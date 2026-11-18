@@ -1,0 +1,36 @@
+{
+  "// Task #4380": [
+    "Declaration-only build for @ai-setting/roy-bot-core.",
+    "",
+    "Why this file exists: bunup.config.ts sets `dts: false` (bunup's dts pass",
+    "fails on pre-existing strict errors in this repo), and nothing replaced it —",
+    "so the published tarball contained ZERO .d.ts files while package.json",
+    "advertised `types: ./dist/index.d.ts` plus per-subpath `types` entries.",
+    "Every downstream `import … from \"@ai-setting/roy-bot-core/…\"` therefore",
+    "resolved to an implicit `any` (TS7016), which silently disabled the",
+    "compile-time guards downstream (see Task #4375 / review finding Y4).",
+    "",
+    "`--noCheck` (TS >= 5.6) emits declarations without type-checking, which is",
+    "what we want here: the emitted .d.ts describe the real code, and the",
+    "pre-existing type errors in unrelated modules no longer block publishing.",
+    "What `--noCheck` does NOT buy: type safety of new code. That is gated",
+    "separately by `npm run typecheck:dts` (no `--noCheck`), which must report",
+    "ZERO errors under src/env/task/backend/ — the pre-existing errors live in",
+    "unrelated modules (bounty-cli-handler, llm adapters, delegate-tool,",
+    "sqlite-task-store row mapping, batch-archive/update tools) and are",
+    "documented in the Task #4380 report rather than silently absorbed here."
+  ],
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "declaration": true,
+    "declarationMap": false,
+    "emitDeclarationOnly": true,
+    "noEmit": false,
+    "sourceMap": false,
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist", "**/*.test.ts", "**/*.spec.ts", "test/**"]
+}

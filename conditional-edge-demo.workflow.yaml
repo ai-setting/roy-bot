@@ -1,0 +1,57 @@
+name: conditional-edge-demo
+version: "1.0"
+description: |
+  A minimal conditional-edge workflow demo.
+  - Both branches depend_on "start" so they are not scheduled initially
+  - edges.when gates which branch is allowed to start after "start" completes
+  - The false branch is marked as skipped (and will show up in trace/span)
+
+config:
+  parallel_limit: null
+
+entry: start
+
+nodes:
+  - id: start
+    type: tool
+    name: Start
+    config:
+      tool: echo
+      message: "start: threshold={{input.threshold}}"
+
+  - id: high
+    type: tool
+    name: High branch
+    config:
+      tool: echo
+      message: "high: threshold={{input.threshold}} > 5"
+    depends_on:
+      - start
+
+  - id: low
+    type: tool
+    name: Low branch
+    config:
+      tool: echo
+      message: "low: threshold={{input.threshold}} <= 5"
+    depends_on:
+      - start
+
+  - id: done
+    type: tool
+    name: Done
+    config:
+      tool: echo
+      message: "done"
+    depends_on:
+      - high
+      - low
+
+edges:
+  - from: start
+    to: high
+    when: "{{input.threshold}} > 5"
+  - from: start
+    to: low
+    when: "{{input.threshold}} <= 5"
+

@@ -1,0 +1,160 @@
+# Parallel Processing with Error Handling
+#
+# This workflow demonstrates:
+# - Multiple parallel execution branches (A, B, C)
+# - Retry logic with different backoff strategies
+# - Merge patterns for combining parallel results
+# - Error recovery paths
+#
+# Diagram:
+#
+#   entry
+#    ├── task-a1 → task-a2 → task-a3 ──┐
+#    ├── task-b1 → task-b2 ───────────┤
+#    │          └── task-b3* ──────────┤
+#    └── task-c1 → task-c2** ─────────┴──→ merge-ab → final
+#
+# * task-b3 has retry: { max_attempts: 2, backoff: fixed }
+# ** task-c2 has retry: { max_attempts: 3, backoff: exponential }
+
+name: parallel-processing
+version: "1.0"
+description: Parallel processing with error handling and retry logic
+
+metadata:
+  author: Roy Agent
+  tags:
+    - parallel
+    - retry
+    - error-handling
+
+nodes:
+  # ========== Entry ==========
+  - id: entry
+    type: tool
+    config:
+      tool: echo
+      message: "Starting parallel processing"
+
+  # ========== Branch A (Linear Chain) ==========
+  - id: task-a1
+    type: tool
+    name: Task A1
+    config:
+      tool: calculator
+      operation: a1-process
+    depends_on:
+      - entry
+
+  - id: task-a2
+    type: tool
+    name: Task A2
+    config:
+      tool: calculator
+      operation: a2-process
+    depends_on:
+      - task-a1
+
+  - id: task-a3
+    type: tool
+    name: Task A3
+    config:
+      tool: calculator
+      operation: a3-process
+    depends_on:
+      - task-a2
+
+  # ========== Branch B (Parallel Tasks) ==========
+  - id: task-b1
+    type: tool
+    name: Task B1
+    config:
+      tool: calculator
+      operation: b1-process
+    depends_on:
+      - entry
+
+  - id: task-b2
+    type: tool
+    name: Task B2
+    config:
+      tool: calculator
+      operation: b2-process
+    depends_on:
+      - task-b1
+
+  # task-b3 has retry with fixed backoff
+  - id: task-b3
+    type: tool
+    name: Task B3 (with Retry)
+    config:
+      tool: calculator
+      operation: b3-process
+    depends_on:
+      - task-b1
+    retry:
+      max_attempts: 2
+      backoff: fixed
+      initial_delay: 500
+
+  # ========== Branch C (with Exponential Retry) ==========
+  - id: task-c1
+    type: tool
+    name: Task C1
+    config:
+      tool: calculator
+      operation: c1-process
+    depends_on:
+      - entry
+
+  # task-c2 has retry with exponential backoff
+  - id: task-c2
+    type: tool
+    name: Task C2 (with Retry)
+    config:
+      tool: calculator
+      operation: c2-process
+    depends_on:
+      - task-c1
+    retry:
+      max_attempts: 3
+      backoff: exponential
+      initial_delay: 1000
+
+  # ========== Merge Point ==========
+  - id: merge-ab
+    type: merge
+    name: Merge All Branches
+    config:
+      strategy: collect
+    depends_on:
+      - task-a3
+      - task-b2
+      - task-c2
+
+  # ========== Final Output ==========
+  - id: final
+    type: tool
+    name: Final Processing
+    config:
+      tool: echo
+      message: "All branches completed"
+    depends_on:
+      - merge-ab
+
+outputs:
+  - name: branch_a_result
+    source: task-a3
+    path: result
+
+  - name: branch_b_result
+    source: task-b2
+    path: result
+
+  - name: branch_c_result
+    source: task-c2
+    path: result
+
+  - name: merged_results
+    source: merge-ab
+    path: inputs

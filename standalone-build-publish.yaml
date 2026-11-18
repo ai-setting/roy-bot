@@ -1,0 +1,96 @@
+name: standalone-build-publish
+version: "1.0"
+description: 构建并发布 standalone 到 npmjs
+
+nodes:
+  - id: check-versions
+    type: tool
+    name: Check versions
+    config:
+      tool: bash
+      inputs:
+        command: |
+          echo "=== Package Versions ==="
+          CLI_VER=$(node -p 'require("./packages/cli/package.json").version')
+          STANDALONE_VER=$(node -p 'require("./packages/roy-bot-standalone/package.json").version')
+          echo "- cli: $CLI_VER"
+          echo "- standalone: $STANDALONE_VER"
+
+  - id: build-standalone
+    type: tool
+    name: Build standalone
+    config:
+      tool: bash
+      inputs:
+        command: |
+          echo "=== Building standalone binary ==="
+          bun run build:cli:prod --single
+          echo "✅ Build complete"
+
+  - id: check-already-published
+    type: tool
+    name: Check if published
+    config:
+      tool: bash
+      inputs:
+        command: |
+          STANDALONE_VER=$(node -p 'require("./packages/roy-bot-standalone/package.json").version')
+          HTTP=$(curl -s -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/@ai-setting%2froy-bot-standalone/$STANDALONE_VER")
+          echo "standalone@$STANDALONE_VER: HTTP $HTTP"
+          echo "EXISTS=$([ "$HTTP" = "200" ] && echo "true" || echo "false")" > /tmp/wf-exists.txt
+
+  - id: publish
+    type: tool
+    name: Publish to npmjs
+    config:
+      tool: bash
+      inputs:
+        command: |
+          STANDALONE_VER=$(node -p 'require("./packages/roy-bot-standalone/package.json").version')
+          source /tmp/wf-exists.txt
+          
+          if [ "$EXISTS" = "true" ]; then
+            echo "⚠️  Version $STANDALONE_VER already published, skipping"
+            exit 0
+          fi
+          
+          echo "=== Publishing @ai-setting/roy-bot-standalone@$STANDALONE_VER ==="
+          cd packages/roy-bot-standalone
+          npm publish --access public
+          echo "✅ Published"
+
+  - id: verify
+    type: tool
+    name: Verify npmjs
+    config:
+      tool: bash
+      inputs:
+        command: |
+          sleep 5
+          STANDALONE_VER=$(node -p 'require("./packages/roy-bot-standalone/package.json").version')
+          NPM_VER=$(npm view @ai-setting/roy-bot-standalone version)
+          echo "npmjs: $NPM_VER"
+          if [ "$NPM_VER" = "$STANDALONE_VER" ]; then
+            echo "✅ Version verified"
+          else
+            echo "⚠️  Version mismatch"
+          fi
+
+  - id: summary
+    type: tool
+    name: Summary
+    config:
+      tool: bash
+      inputs:
+        command: |
+          STANDALONE_VER=$(node -p 'require("./packages/roy-bot-standalone/package.json").version')
+          echo ""
+          echo "══════════════════════════════════════════"
+          echo "  Standalone Build & Publish Complete"
+          echo "══════════════════════════════════════════"
+          echo ""
+          echo "  @ai-setting/roy-bot-standalone: $STANDALONE_VER"
+          echo ""
+          echo "  Install: npm install -g @ai-setting/roy-bot-standalone"
+          echo "  Version: roy-bot --version"
+          echo ""

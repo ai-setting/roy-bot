@@ -1,0 +1,341 @@
+name: a-stock-screener-v0.6.0
+version: "0.6.0"
+description: |
+  A 股投资选股 workflow v0.6.0 — workflow portability 重构版
+
+  ## 阶段流程（v0.6.0 - workflow portability）
+  1. **load-candidates**: 加载候选股票池（A 股全市场）
+  1.5. **market-timing**: 大盘择时（HS300 60MA + RSRS）→ 输出市场状态 + 推荐 top_n
+  2. **run-strategies**: 运行 5 大策略（composite/value/dragon_leader/hot_money/sector_rotation）
+  3. **risk-assess**: 风险评估（波动率/最大回撤/Beta + 风险等级）
+  4. **apply-phase1-filters**: Phase 1 安全过滤（退市股/ST）
+  4.5. **consensus-filter**: 多策略共识过滤（≥2 策略同时推荐）
+  5. **v4-scoring**: v0.4 新评分模型（基于 IC 分析重构）
+  5.5. **ml-prediction**: LightGBM 模型预测（v0.5.0 新增）
+  6. **aggregate**: 汇总生成 Top N 候选 + Markdown 报告
+  7. **backtest**: 回测（基于历史报告 + 实际收益对比）
+  8. **dashboard**: 启动 FastAPI Dashboard（端口 7789）
+  9. **publish-report**: 推送飞书文档 + IM 消息通知
+
+  ## v0.5.0 → v0.6.0 变更（workflow portability - Task #1998）
+
+  ### ✅ 已完成（本 workflow 仓库内）
+  - 新增 `tool: python_call` 节点类型（packages/core/src/env/workflow/nodes/python-call-node.ts）
+    - 通过子进程派发 `python3 -c "from <module> import <fn>; <fn>(**args)"`
+    - args 通过 stdin 传 JSON
+    - 内置 allow-list 安全护栏（默认 `investment_strategy.*`）
+  - workflow 节点类型从 `tool: bash` 改为 `tool: python_call`
+  - **去除硬编码路径**：旧版虚拟环境脚本调用 → `investment_strategy.scripts.*`
+  - **去除硬编码 workdir**：每节点可独立 `cwd`，或交给环境变量
+  - **去除 investment-strategy CLI 直接调用**：走 Python 包 API
+
+  ### ⚠️ 前置工作（需要用户在 investment-strategy 仓库提 PR）
+  投资策略仓库当前 `scripts/*.py` 是独立脚本，需要重构为 Python 包内的模块：
+  ```
+  investment-strategy/
+    src/investment_strategy/
+      scripts/
+        market_timing.py        # 暴露 run(**args) 函数
+        apply_filters.py        # 暴露 run(**args) 函数
+        consensus_filter.py     # 暴露 run(**args) 函数
+        scoring_v4_test.py      # 暴露 run(**args) 函数（已部分模块化）
+        ml_factor_model.py      # 暴露 run(**args) 函数
+        full_factor_report.py   # 暴露 run(**args) 函数
+        backtest.py             # 暴露 run(**args) 函数
+        dashboard.py            # 暴露 run(**args) 函数
+        feishu_publish.py       # 暴露 run(**args) 函数
+  ```
+  每个脚本的主入口（`main()`）应改为 `run(**kwargs)` 函数签名，返回 JSON-serializable dict。
+  旧 CLI 入口（`if __name__ == "__main__": sys.exit(main())`）保留兼容即可。
+
+  ### 设计取舍
+  - **python_call 节点的 args 通过 stdin 传 JSON**，避免命令行长度限制和特殊字符转义
+  - **stdout 解析为 JSON**：dict/array 自动解析为结构化数据，可用于下游模板 `{{nodes.foo.output.x}}`
+  - **allow-list 安全**：默认只允许 `investment_strategy.*` 模块，防止误用 `os.system` 等危险模块
+  - **超时通过 stdin end + SIGTERM/SIGKILL 两阶段 kill**：避免 Python 子进程挂起
+  - **跨平台 cwd/python 覆盖**：用 `python: /opt/conda/bin/python3` 切换解释器；用 `cwd` 指定 repo 路径
+  - **dashboard / feishu 保留 tool: bash**：长驻服务 + 调 lark-cli 不属于 Python 包，强行迁到 python_call 不划算
+
+  ## 工具依赖
+  - `python3` 在 `$PATH`（或通过 config.python / input.python_bin 指定）
+  - `investment_strategy` 包已 `pip install -e .`（前置工作完成后）
+  - `lark-cli`（用于飞书推送）
+  - `dashboard` 仍然 bash，但不带硬编码路径
+
+config:
+  parallel_limit: 1
+  timeout: 1800000
+  maxIterations: 100
+  loopEnabled: false
+
+input:
+  type: object
+  properties:
+    feishu_publish:
+      type: string
+      enum: ["true", "false"]
+      default: "true"
+      description: 是否推送飞书
+    base_top_n:
+      type: integer
+      default: 20
+      description: 基础推荐 top_n（择时会动态调整）
+    consensus_threshold:
+      type: integer
+      default: 2
+      description: 共识阈值（≥N 策略同时推荐）
+    enable_backtest:
+      type: string
+      enum: ["true", "false"]
+      default: "true"
+      description: 是否运行回测步骤
+    enable_dashboard:
+      type: string
+      enum: ["true", "false"]
+      default: "true"
+      description: 是否启动 Dashboard
+    enable_ml:
+      type: string
+      enum: ["true", "false"]
+      default: "true"
+      description: 是否启用 ML 预测
+    dashboard_port:
+      type: integer
+      default: 7789
+      description: Dashboard 端口
+    strategy_repo_path:
+      type: string
+      default: ""  # 默认空 → 用当前进程的 cwd（由执行环境决定）
+      description: investment-strategy 仓库根路径（用于 cwd）。空字符串表示用当前工作目录。
+    python_bin:
+      type: string
+      default: "python3"
+      description: Python 解释器路径
+
+nodes:
+  - id: load-candidates
+    type: tool
+    name: "Step 1: 加载候选股票池（占位 - 等待 investment-strategy 改造）"
+    config:
+      tool: bash
+      inputs:
+        timeout: 60000
+        command: |
+          echo "=== Step 1: 加载候选股票池（v0.6.0 placeholder）==="
+          echo "市场: A 股"
+          echo "数据源: akshare + baostock"
+          echo ""
+          echo '{"candidates_loaded": 1800, "market": "A 股", "timestamp": "placeholder", "version": "v0.6.0"}'
+
+  # ===================================================================
+  # Step 1.5 — 大盘择时：tool:bash → python_call
+  # ===================================================================
+  - id: market-timing
+    type: python_call
+    name: "Step 1.5: 大盘择时（HS300 60MA + RSRS）"
+    config:
+      module: investment_strategy.scripts.market_timing
+      function: run
+      args:
+        base_top_n: "{{input.base_top_n}}"
+        output: "reports/market_state.json"
+      cwd: "{{input.strategy_repo_path}}"
+      python: "{{input.python_bin}}"
+      timeout: 120000
+    depends_on:
+      - load-candidates
+
+  # ===================================================================
+  # Step 2 — 运行策略：investment_strategy run CLI → python_call
+  # ===================================================================
+  - id: run-strategies
+    type: python_call
+    name: "Step 2: 运行策略（动态调整）"
+    config:
+      module: investment_strategy.scripts.run_strategies
+      function: run
+      args:
+        # 动态从 market-timing 节点的输出读 active_strategies + recommended_top_n
+        active_strategies: "{{nodes.market-timing.output.recommendation.active_strategies}}"
+        recommended_top_n: "{{nodes.market-timing.output.recommendation.recommended_top_n}}"
+        with_risk: true
+      cwd: "{{input.strategy_repo_path}}"
+      python: "{{input.python_bin}}"
+      timeout: 1800000
+    depends_on:
+      - market-timing
+
+  # ===================================================================
+  # Step 3 — 风险评估（lightweight metadata node）
+  # ===================================================================
+  - id: risk-assess
+    type: python_call
+    name: "Step 3: 风险评估"
+    config:
+      module: investment_strategy.scripts.risk_assess
+      function: run
+      args:
+        strategies_output: "{{nodes.run-strategies.output}}"
+      cwd: "{{input.strategy_repo_path}}"
+      python: "{{input.python_bin}}"
+      timeout: 300000
+    depends_on:
+      - run-strategies
+
+  # ===================================================================
+  # Step 4 — Phase 1 安全过滤
+  # ===================================================================
+  - id: apply-phase1-filters
+    type: python_call
+    name: "Step 4: Phase 1 安全过滤（退市/ST）"
+    config:
+      module: investment_strategy.scripts.apply_filters
+      function: run
+      args: {}
+      cwd: "{{input.strategy_repo_path}}"
+      python: "{{input.python_bin}}"
+      timeout: 60000
+    depends_on:
+      - risk-assess
+
+  # ===================================================================
+  # Step 4.5 — 多策略共识过滤
+  # ===================================================================
+  - id: consensus-filter
+    type: python_call
+    name: "Step 4.5: 多策略共识过滤"
+    config:
+      module: investment_strategy.scripts.consensus_filter
+      function: run
+      args:
+        threshold: "{{input.consensus_threshold}}"
+        output: "reports/latest_consensus.md"
+      cwd: "{{input.strategy_repo_path}}"
+      python: "{{input.python_bin}}"
+      timeout: 60000
+    depends_on:
+      - apply-phase1-filters
+
+  # ===================================================================
+  # Step 5 — v0.4 新评分模型
+  # ===================================================================
+  - id: v4-scoring
+    type: python_call
+    name: "Step 5: v0.4 新评分模型（IC 驱动权重）"
+    config:
+      module: investment_strategy.scripts.scoring_v4
+      function: run
+      args:
+        validate_ic: true
+      cwd: "{{input.strategy_repo_path}}"
+      python: "{{input.python_bin}}"
+      timeout: 60000
+    depends_on:
+      - consensus-filter
+
+  # ===================================================================
+  # Step 5.5 — LightGBM 预测
+  # ===================================================================
+  - id: ml-prediction
+    type: python_call
+    name: "Step 5.5: LightGBM 模型预测"
+    config:
+      module: investment_strategy.scripts.ml_factor_model
+      function: run
+      args:
+        enabled: "{{input.enable_ml}}"
+      cwd: "{{input.strategy_repo_path}}"
+      python: "{{input.python_bin}}"
+      timeout: 600000
+    depends_on:
+      - v4-scoring
+
+  # ===================================================================
+  # Step 6 — 因子分析报告
+  # ===================================================================
+  - id: aggregate
+    type: python_call
+    name: "Step 6: 因子分析 + Top N 汇总"
+    config:
+      module: investment_strategy.scripts.full_factor_report
+      function: run
+      args: {}
+      cwd: "{{input.strategy_repo_path}}"
+      python: "{{input.python_bin}}"
+      timeout: 600000
+    depends_on:
+      - ml-prediction
+
+  # ===================================================================
+  # Step 7 — 回测
+  # ===================================================================
+  - id: backtest
+    type: python_call
+    name: "Step 7: 回测对比（v0.4 vs v0.2）"
+    config:
+      module: investment_strategy.scripts.backtest
+      function: run
+      args:
+        enabled: "{{input.enable_backtest}}"
+      cwd: "{{input.strategy_repo_path}}"
+      python: "{{input.python_bin}}"
+      timeout: 600000
+    depends_on:
+      - aggregate
+
+  # ===================================================================
+  # Step 8 — Dashboard 启动（保持 bash，因为是长驻服务）
+  # 未来可拆为 health-check + start 两个 python_call 节点
+  # ===================================================================
+  - id: dashboard
+    type: tool
+    name: "Step 8: 启动 FastAPI Dashboard"
+    config:
+      tool: bash
+      inputs:
+        timeout: 30000
+        command: |
+          set -e
+          if [ "{{input.enable_dashboard}}" = "true" ]; then
+            # 杀掉旧进程（dashboard 是长驻服务，需要后台）
+            pkill -f "scripts/dashboard.py" 2>/dev/null || true
+            sleep 2
+            # 启动新进程（在 strategy_repo_path 下）
+            cd "{{input.strategy_repo_path}}" 2>/dev/null || cd .
+            nohup {{input.python_bin}} -m investment_strategy.scripts.dashboard > /tmp/dashboard.log 2>&1 &
+            sleep 3
+            PORT={{input.dashboard_port}}
+            if curl -s http://localhost:$PORT/api/overview > /dev/null 2>&1; then
+              echo "✅ Dashboard 启动成功: http://localhost:$PORT/"
+            else
+              echo "❌ Dashboard 启动失败"
+              tail -20 /tmp/dashboard.log
+            fi
+          else
+            echo "⏭️ 跳过（enable_dashboard=false）"
+          fi
+    depends_on:
+      - backtest
+
+  # ===================================================================
+  # Step 9 — 飞书推送（保持 bash — 调 lark-cli 不属于 investment_strategy）
+  # ===================================================================
+  - id: publish-report
+    type: tool
+    name: "Step 9: 推送飞书"
+    config:
+      tool: bash
+      inputs:
+        timeout: 60000
+        command: |
+          if [ "{{input.feishu_publish}}" = "true" ]; then
+            echo "📄 准备飞书推送..."
+            cd "{{input.strategy_repo_path}}" 2>/dev/null || cd .
+            {{input.python_bin}} -m investment_strategy.scripts.feishu_publish
+          else
+            echo "⏭️ 跳过（feishu_publish=false）"
+          fi
+          echo ""
+          echo "✅ v0.6.0 workflow 全部完成"
+    depends_on:
+      - dashboard

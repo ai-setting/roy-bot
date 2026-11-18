@@ -1,0 +1,58 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM"],
+    "outDir": "./dist/cli",
+    "strict": false,
+    "noEmit": true,
+    "noImplicitAny": false,
+    "noImplicitReturns": false,
+    "noFallthroughCasesInSwitch": false,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "resolveJsonModule": true,
+    "jsx": "react",
+    "types": ["node"],
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+    "baseUrl": ".",
+    "paths": {
+      "@ai-setting/roy-bot-core": ["../core/src"],
+      "@ai-setting/roy-bot-core/*": ["../core/src/*"],
+      "@ai-setting/roy-bot-coder-harness": ["../coder-harness/src"],
+      "@ai-setting/roy-bot-coder-harness/*": ["../coder-harness/src/*"],
+      "@ai-setting/roy-bot-ontology-harness": ["../ontology-harness/src"],
+      "@ai-setting/roy-bot-ontology-harness/*": ["../ontology-harness/src/*"]
+    }
+  },
+  "include": [
+    "src/**/*.ts",
+    "../core/src/env/**/*.ts",
+    "../core/src/components/**/*.ts",
+    "../core/src/config/**/*.ts",
+    "../core/src/index.ts",
+    "../coder-harness/src/**/*.ts",
+    "../ontology-harness/src/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "**/*.test.ts",
+    "**/*.test.tsx",
+    "**/*.spec.ts",
+    "**/*.spec.tsx",
+    "**/__tests__/**",
+    "**/__integration__/**",
+    "../core/src/**/*.test.ts",
+    "../core/src/**/*.test.tsx",
+    "../coder-harness/src/**/*.test.ts",
+    "../coder-harness/src/**/*.test.tsx"
+  ]
+}

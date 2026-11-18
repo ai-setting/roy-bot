@@ -1,0 +1,43 @@
+{
+  "name": "@ai-setting/roy-bot-standalone",
+  "version": "1.7.95",
+  "description": "Intelligent OS for AI agents - Standalone binary for all platforms",
+  "type": "module",
+  "bin": {
+    "roy-bot": "./bin/run.js",
+    "roy-bot-linux-x64": "./bin/roy-bot-linux-x64",
+    "roy-bot-linux-arm64": "./bin/roy-bot-linux-arm64",
+    "roy-bot-darwin-x64": "./bin/roy-bot-darwin-x64",
+    "roy-bot-darwin-arm64": "./bin/roy-bot-darwin-arm64",
+    "roy-bot-windows-x64": "./bin/roy-bot-windows-x64.exe"
+  },
+  "files": [
+    "bin/**/*"
+  ],
+  "os": [
+    "linux",
+    "darwin",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "author": "ai-setting",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ai-setting/roy-bot.git",
+    "directory": "packages/roy-bot-standalone"
+  },
+  "scripts": {
+    "prepublishOnly": "sh scripts/prepublish-check.sh"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org",
+    "access": "public"
+  }
+}

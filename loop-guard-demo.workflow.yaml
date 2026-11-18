@@ -1,0 +1,97 @@
+name: loop-guard-demo
+version: "1.0.0"
+description: |
+  Minimal example demonstrating the engine-side loop_guard mechanism
+  (Task #2283 — generalized "value_unchanged" progress detection).
+
+  The `tdd-implement` node has a loop_guard that compares the resolved
+  `previous_signal` (any TemplateResolver path) against the stdout of
+  `current_signal_command` (any shell command). When the two values
+  match for `max_consecutive_no_progress` consecutive re-entries, the
+  engine short-circuits the agent and marks the node as FAIL with
+  `fail_message` injected — preventing the typical 5-30 min no-progress
+  agent run.
+
+  Key points demonstrated here:
+    - `previous_signal`: any TemplateResolver path, including
+      array indexing (commits[-1], .length)
+    - `current_signal_command`: any shell command
+    - `cwd`: optional override (defaults to workflow input project_path)
+    - `max_consecutive_no_progress`: default 1 (trip on first no-change)
+    - `fail_message`: optional custom message (used as `fail_reason`)
+
+  This is a demo workflow; no real LLM is invoked.
+
+entry: tdd-implement
+
+config:
+  loopEnabled: true
+  maxIterations: 5
+  parallel_limit: 1
+  timeout: 60000
+
+nodes:
+  - id: tdd-implement
+    type: agent
+    name: "Phase 4 (demo): TDD with loop_guard"
+    config:
+      agent_type: general
+      loop_guard:
+        type: value_unchanged
+        # previous_signal — any TemplateResolver path.
+        # Example: the last commit hash from this node's previous output.
+        previous_signal: "{{nodes.tdd-implement.commits[-1]}}"
+        # current_signal_command — any shell command.
+        # Engine captures stdout, trims it, and JSON.stringify-compares
+        # it to the resolved previous value.
+        current_signal_command: "git rev-parse HEAD"
+        # cwd: optional. If omitted, falls back to
+        # input.project_path, then process.cwd().
+        cwd: "/repo"
+        # max_consecutive_no_progress — default 1 (immediate fail).
+        max_consecutive_no_progress: 1
+        # fail_message — injected as the node's fail_reason when the
+        # guard trips. Optional; default message is auto-generated.
+        fail_message: "no progress: HEAD unchanged after back-edge re-entry"
+      output:
+        mode: json
+        schema:
+          type: object
+          properties:
+            tdd_status:
+              type: string
+            commits:
+              type: array
+              items:
+                type: string
+            fail_reason:
+              type: string
+            _loop_guard_triggered:
+              type: boolean
+      prompt: |
+        Demo only — do not run in production. The engine's loop_guard
+        will short-circuit this agent if the previous commit hash
+        matches the current `git rev-parse HEAD` for
+        `max_consecutive_no_progress` consecutive re-entries.
+
+edges:
+  # Self-loop: tdd-implement FAIL → re-run. Loop_guard will trip after
+  # max_consecutive_no_progress iterations with no new commit.
+  - from: tdd-implement
+    to: tdd-implement
+    when: "{{nodes.tdd-implement.tdd_status}} == 'FAIL'"
+
+inputs:
+  project_path:
+    type: string
+    description: Path to a git repo (used as loop_guard's cwd fallback)
+    required: true
+
+outputs: []
+
+metadata:
+  author: roy-bot
+  tags:
+    - example
+    - loop-guard
+    - back-edge

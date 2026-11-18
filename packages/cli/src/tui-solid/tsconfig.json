@@ -1,0 +1,11 @@
+{
+  "//": "片1 地基 —— Solid 作用域的 JSX 转译隔离（第一道防线）。",
+  "//2": "bun build（Bun.build / build-cli-dev.ts）按 per-file 嵌套 tsconfig 选 jsxImportSource；",
+  "//3": "根 tsconfig 仍是 jsx:\"react\"（Ink 链路），此处覆盖为 @opentui/solid（interactive 链路）。",
+  "//4": "bun run（dev 运行时）不认 per-file tsconfig —— 那条路依赖",
+  "//5": "scripts/tui-solid/solid-jsx-plugin.ts 的按路径 scoped preload（第二道防线）。",
+  "compilerOptions": {
+    "jsx": "react-jsx",
+    "jsxImportSource": "@opentui/solid"
+  }
+}

@@ -1,0 +1,114 @@
+# Diamond Pattern Workflow
+#
+# Classic diamond dependency pattern demonstrating:
+# - Single entry point (A)
+# - Multiple parallel branches (B1, B2, B3)
+# - Merge point (C) with retry logic
+# - Single exit point (D)
+#
+# Diagram:
+#
+#        A
+#      / | \
+#     B1 B2 B3
+#      \ | /
+#        C*
+#        |
+#        D
+#
+# * C has retry: { max_attempts: 2, backoff: exponential }
+
+name: diamond-pattern
+version: "1.0"
+description: Classic diamond dependency pattern with parallel branches and retry
+
+metadata:
+  author: Roy Agent
+  tags:
+    - diamond
+    - parallel
+    - retry
+
+nodes:
+  # ========== Entry Point ==========
+  - id: A
+    type: tool
+    name: Entry Node
+    config:
+      tool: echo
+      message: "Starting diamond workflow"
+    depends_on: []
+
+  # ========== Parallel Branch 1 ==========
+  - id: B1
+    type: tool
+    name: Branch 1
+    config:
+      tool: calculator
+      operation: process-1
+    depends_on:
+      - A
+
+  # ========== Parallel Branch 2 ==========
+  - id: B2
+    type: tool
+    name: Branch 2
+    config:
+      tool: calculator
+      operation: process-2
+    depends_on:
+      - A
+
+  # ========== Parallel Branch 3 ==========
+  - id: B3
+    type: tool
+    name: Branch 3
+    config:
+      tool: calculator
+      operation: process-3
+    depends_on:
+      - A
+
+  # ========== Merge Point with Retry ==========
+  - id: C
+    type: tool
+    name: Merge Point (with Retry)
+    config:
+      tool: calculator
+      operation: merge-and-process
+    depends_on:
+      - B1
+      - B2
+      - B3
+    retry:
+      max_attempts: 2
+      backoff: exponential
+      initial_delay: 500
+    timeout: 60000
+
+  # ========== Exit Point ==========
+  - id: D
+    type: tool
+    name: Exit Node
+    config:
+      tool: echo
+      message: "Diamond workflow complete"
+    depends_on:
+      - C
+
+outputs:
+  - name: branch_1_result
+    source: B1
+    path: result
+
+  - name: branch_2_result
+    source: B2
+    path: result
+
+  - name: branch_3_result
+    source: B3
+    path: result
+
+  - name: merged_result
+    source: C
+    path: result

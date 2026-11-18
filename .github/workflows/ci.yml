@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main", "develop" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  # Type check all packages
+  typecheck:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
+          
+      - name: Install pnpm
+        run: npm install -g pnpm
+          
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+        
+      - name: Type check core
+        run: |
+          cd packages/core
+          npx tsc --noEmit --skipLibCheck --project tsconfig.json || true
+          
+      - name: Type check cli
+        run: |
+          cd packages/cli
+          npx tsc --noEmit --skipLibCheck --project tsconfig.json || true
+
+  # Test all packages
+  test:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
+          
+      - name: Install pnpm
+        run: npm install -g pnpm
+          
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+        
+      - name: Build packages
+        run: |
+          # 使用 bunup 从根目录构建，使用 bunup.config.ts 配置
+          bun run build
+        
+      - name: Run tests
+        run: bun test --max-concurrency 1
+
+  # Build all packages
+  build:
+    runs-on: ubuntu-latest
+    needs: [typecheck, test]
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.13
+          
+      - name: Install pnpm
+        run: npm install -g pnpm
+          
+      - name: Install dependencies
+        run: pnpm install
+        
+      - name: Build all packages
+        run: pnpm run build

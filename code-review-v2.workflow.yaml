@@ -1,0 +1,261 @@
+name: code-review
+version: "2.6"
+description: |
+  Code review workflow v2.6 — reviews a commit range and forces
+  the review-expert agent to call `workflow_submit_output({result: <markdown>})`.
+
+  INPUT: {
+    "repo_path":   "string  — absolute path to the git repo (default: current working directory).",
+    "base_ref":    "string  — review commits in `<base_ref>..HEAD` (overrides commits).",
+    "commits":     "string  — space-separated commit refs. Empty + no base_ref → HEAD~3..HEAD.",
+    "severity_threshold": "string  — minimum severity to include findings (default: all).",
+    "review_depth":       "string  — 'quick' | 'normal' (default) | 'deep'."
+  }
+
+  FLOW:
+    pre-check (resolve commits) → review-expert (LLM with strict submit contract) →
+    output-result (hard check for empty output, fail-fast on miss).
+
+  UPGRADES OVER v2.5:
+    - HARD REQUIREMENT: review-expert MUST call `workflow_submit_output({ result: <markdown> })`.
+      Writing the report to a file via `write_file` or `cat > file << EOF` is NOT sufficient —
+      the workflow engine only captures the result from the tool call.
+    - Pre-check still validates the repo and resolves the commit list.
+    - `output-result` node runs a hard check on `{{review-expert.result}}` and exits with
+      code 11 if the result is empty (a clear signal to re-run with an explicit prompt).
+    - Same 3-node structure as v2.5 (pre-check / review-expert / output-result).
+    - JSON output schema unchanged: `{ "result": string }`.
+
+  WHEN TO USE: review recent commits, validate a series of changes before merge, audit code
+  that just landed. WHEN NOT TO USE: deep architectural refactor planning (use strict-task-agent
+  workflow instead).
+
+entry: pre-check
+
+config:
+  parallel_limit: 1
+  timeout: 900000
+  maxIterations: 100
+  loopEnabled: false
+
+nodes:
+  # ===========================================================
+  # 1. Pre-check: validate repo & resolve commits
+  # ===========================================================
+  - id: pre-check
+    type: tool
+    name: "Pre-Check: Validate Repo & Resolve Commits"
+    config:
+      tool: bash
+      command: |
+        set -euo pipefail
+
+        REPO_PATH="{{input.repo_path}}"
+        if [ -z "$REPO_PATH" ]; then REPO_PATH="$(pwd)"; fi
+
+        echo "[code-review v2.6 / pre-check]"
+        echo "repo_path          = $REPO_PATH"
+        echo "base_ref           = {{input.base_ref}}"
+        echo "commits            = {{input.commits}}"
+        echo "severity_threshold = {{input.severity_threshold}}"
+        echo "review_depth       = {{input.review_depth}}"
+        echo
+
+        if ! git -C "$REPO_PATH" rev-parse --git-dir > /dev/null 2>&1; then
+          echo "ERROR: $REPO_PATH is not a git repository" >&2
+          exit 1
+        fi
+        echo "✓ git repository: $(git -C "$REPO_PATH" rev-parse --show-toplevel)"
+
+        cd "$REPO_PATH"
+        if [ -n "{{input.base_ref}}" ]; then
+          COMMITS=$(git log --reverse --format="%H" "{{input.base_ref}}..HEAD" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')
+          echo "✓ resolved from base_ref={{input.base_ref}}..HEAD"
+        elif [ -n "{{input.commits}}" ]; then
+          COMMITS="{{input.commits}}"
+          echo "✓ using provided commits"
+        else
+          COMMITS=$(git log --reverse --format="%H" HEAD~3..HEAD 2>/dev/null | tr '\n' ' ' | sed 's/ $//')
+          echo "✓ defaulting to HEAD~3..HEAD"
+        fi
+
+        if [ -z "$COMMITS" ]; then
+          echo "ERROR: no commits resolved. Check input.commits or input.base_ref." >&2
+          exit 2
+        fi
+
+        echo
+        echo "--- commit log (oldest → newest) ---"
+        echo "$COMMITS" | tr ' ' '\n' | tac | xargs -I{} git log -1 --format="%h %an %ad %s" --date=short {}
+
+        echo
+        echo "--- diff stats (HEAD..oldest commit, truncated to 200 lines) ---"
+        echo "$COMMITS" | tr ' ' '\n' | tac | xargs -I{} git show --stat --format="=== %h %s ===" {} | head -200
+
+        echo
+        echo "RESOLVED_COMMITS=$COMMITS"
+    depends_on: []
+
+  # ===========================================================
+  # 2. Review Expert — MUST call workflow_submit_output
+  # ===========================================================
+  - id: review-expert
+    type: agent
+    name: "Code Review Expert (v2.6 — strict submit contract)"
+    config:
+      agent_type: general
+      maxIterations: 15
+      options:
+        allowedTools:
+          - bash
+          - read_file
+          - glob
+          - grep
+          - echo
+          - write_file
+          - workflow_submit_output
+      output:
+        mode: json
+        schema:
+          type: object
+          properties:
+            result:
+              type: string
+          required:
+            - result
+      prompt: |
+        You are a senior code review expert. Review the supplied commits in detail and
+        produce a structured Markdown report with 3-level severity grading.
+
+        ## WORKFLOW OUTPUT CONTRACT — HARD REQUIREMENT (v2.6)
+
+        The workflow engine captures your review report **ONLY** from the
+        `workflow_submit_output` tool call. If you write the report to a file via
+        `write_file` or `cat > file << EOF ... EOF` but do **NOT** call
+        `workflow_submit_output`, the workflow's output is empty and the user gets
+        "(no output)". This is a critical failure mode that the workflow now fails fast on.
+
+        **You MUST end your review with exactly this call (no exceptions):**
+
+        ```
+        workflow_submit_output({ "result": "<YOUR FULL MARKDOWN REPORT HERE>" })
+        ```
+
+        The `result` argument is a JSON string. If the report contains quotes, backslashes,
+        or newlines, you MUST escape them as `\"`, `\\`, `\n` (or use a JSON.stringify-style
+        pattern when constructing the value).
+
+        ## RECOMMENDED PATTERN (do this for clarity and auditability)
+
+        1. Compose your full markdown review report as a string variable.
+        2. Use `write_file` to save it to disk for auditing
+           (e.g. `/tmp/review-<timestamp>.md`).
+        3. As the LAST tool call, call `workflow_submit_output({ "result": "<report>" })`.
+        4. Stop. Do not call any other tool after `workflow_submit_output`.
+
+        The file written in step 2 is for the user's local audit trail. The
+        `workflow_submit_output` call in step 3 is what the workflow engine uses
+        to populate the workflow output — they are BOTH required.
+
+        ## Inputs
+
+          - Commits to review: {{input.commits}}
+            (Empty + no base_ref → review HEAD~3..HEAD.)
+          - Base ref (alternative to commits): {{input.base_ref}}
+            (e.g. 'main', 'origin/main' → reviews `<base_ref>..HEAD` in reverse-chronological order.)
+          - Repository path: {{input.repo_path}}
+            (Default: current working directory.)
+          - Severity threshold: {{input.severity_threshold}}
+            (all | minor+ | important+ | critical. Default: all.)
+          - Review depth: {{input.review_depth}}
+            (quick | normal | deep. Default: normal.)
+
+        ## Operating procedure
+
+          1. Resolve the effective commit list (echoed by pre-check). If unclear, re-run:
+             - With base_ref: `git log --reverse --format="%H" <base_ref>..HEAD`
+             - With commits:  use as-is.
+             - Default:        `git log --reverse HEAD~3..HEAD`.
+          2. For each commit, inspect with:
+             - `git show --stat <sha>` (overview)
+             - `git show <sha>` or `git diff <sha>^..<sha>` (full diff)
+             - `read_file` / `grep` for context when the diff is large.
+          3. Apply severity grading:
+             - 🔴 **Critical** — security hole, data loss, broken build, runtime crash, incorrect
+               behavior in production paths.
+             - 🟠 **Important** — likely bug, performance regression, missing tests for core
+               logic, backward-compat break.
+             - 🟢 **Minor** — style, naming, typo, missing edge-case test, comment quality.
+             - ✅ OK — explicit positive observation (used sparingly).
+          4. Respect `severity_threshold` — if `important+`, omit 🟢 Minor findings;
+             if `critical`, only 🔴 Critical.
+          5. Record **cross-commit observations** when multiple commits are reviewed:
+             - Refactor consistency, naming drift, schema/contract evolution
+             - Commit message quality and granularity
+             - Test coverage trends across the range
+             - Architectural pattern adherence
+          6. End your markdown report with EXACTLY one of these verdict lines (on its own line):
+             - `## Verdict\nAPPROVE`  — ready to merge.
+             - `## Verdict\nREQUEST CHANGES`  — has Important-or-worse issues; do not merge yet.
+             - `## Verdict\nBLOCK`  — has Critical issues; must not merge.
+          7. **MANDATORY FINAL STEP:** call
+             `workflow_submit_output({ "result": "<the full markdown report>" })`.
+             Do NOT call any other tool after this.
+    depends_on:
+      - pre-check
+
+  # ===========================================================
+  # 3. Output Result — hard check + preview
+  # ===========================================================
+  - id: output-result
+    type: tool
+    name: "Output Result (v2.6 — hard empty-check + preview)"
+    config:
+      tool: bash
+      command: |
+        set -euo pipefail
+
+        RESULT="{{review-expert.result}}"
+
+        if [ -z "$RESULT" ] || [ "$RESULT" = "(no output)" ]; then
+          echo "=========================================="
+          echo "REVIEW FAILED: review-expert did not call workflow_submit_output"
+          echo "=========================================="
+          echo "ROOT CAUSE:"
+          echo "  The review-expert agent completed but the workflow output is empty."
+          echo "  This usually means the agent wrote the report to a file but"
+          echo "  forgot to call `workflow_submit_output({result: <markdown>})`."
+          echo ""
+          echo "FIX:"
+          echo "  Re-run with a more explicit prompt, OR run a manual review and"
+          echo "  save the report to .roy/code-review/review-<branch>-<task>.md."
+          echo "=========================================="
+          exit 11
+        fi
+
+        SIZE=$(printf '%s' "$RESULT" | wc -c | tr -d ' ')
+        LINES=$(printf '%s\n' "$RESULT" | wc -l | tr -d ' ')
+
+        echo "=========================================="
+        echo "REVIEW CAPTURED: $SIZE bytes / $LINES lines"
+        echo "=========================================="
+        echo "PREVIEW (first 3 lines):"
+        echo "---"
+        printf '%s\n' "$RESULT" | head -3
+        echo "---"
+        echo "LAST 5 LINES:"
+        printf '%s\n' "$RESULT" | tail -5
+        echo "=========================================="
+
+        # Echo the full result for downstream consumers
+        printf '%s\n' "$RESULT"
+    depends_on:
+      - review-expert
+
+outputs: []
+inputs: {}
+
+metadata:
+  tags:
+    - code-review
+    - ai

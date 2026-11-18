@@ -1,0 +1,82 @@
+name: loop-guard-demo-max2
+version: "1.0.0"
+description: |
+  Scenario C from Task #2286 follow-up — `max_consecutive_no_progress: 2`
+  must trip on the 2nd consecutive no-progress re-entry.
+
+  This is a companion to loop-guard-demo.workflow.yaml (which uses
+  max=1). The original bug stored the counter on nodeOutputs, which
+  got overwritten by the next agent run — so max=2 never tripped.
+  The Task #2286 fix persists the counter in a dedicated map.
+
+entry: tdd-implement
+
+config:
+  loopEnabled: true
+  maxIterations: 20
+  parallel_limit: 1
+  timeout: 60000
+
+nodes:
+  - id: tdd-implement
+    type: agent
+    name: "Phase 4 (demo): TDD with loop_guard (max=2)"
+    config:
+      agent_type: general
+      loop_guard:
+        type: value_unchanged
+        # previous_signal: last commit hash from the previous output.
+        previous_signal: "{{nodes.tdd-implement.commits[-1]}}"
+        # current_signal_command: any shell command — returns HEAD
+        # commit. If HEAD doesn't move between back-edges, the guard
+        # increments and trips after 2 consecutive no-progress re-entries.
+        current_signal_command: "git rev-parse HEAD"
+        cwd: "/repo"
+        # max=2 — the original Task #2286 bug: the counter was reset
+        # on every agent run, so max>=2 could never trip. Post-fix the
+        # counter persists in sessionState.loopGuardCounters.
+        max_consecutive_no_progress: 2
+        fail_message: "no progress: HEAD unchanged after back-edge re-entry (max=2)"
+      output:
+        mode: json
+        schema:
+          type: object
+          properties:
+            tdd_status:
+              type: string
+            commits:
+              type: array
+              items:
+                type: string
+            fail_reason:
+              type: string
+            _loop_guard_triggered:
+              type: boolean
+      prompt: |
+        Demo only — do not run in production. The engine's loop_guard
+        (max=2) will short-circuit this agent if HEAD is unchanged
+        for 2 consecutive re-entries. Pre-fix this never tripped; the
+        fix in Task #2286 makes max>=2 work.
+
+edges:
+  # Self-loop: tdd-implement FAIL → re-run. Loop_guard will trip after
+  # 2 consecutive no-progress iterations (max_consecutive_no_progress=2).
+  - from: tdd-implement
+    to: tdd-implement
+    when: "{{nodes.tdd-implement.tdd_status}} == 'FAIL'"
+
+inputs:
+  project_path:
+    type: string
+    description: Path to a git repo (used as loop_guard's cwd fallback)
+    required: true
+
+outputs: []
+
+metadata:
+  author: roy-bot
+  tags:
+    - example
+    - loop-guard
+    - back-edge
+    - max-2

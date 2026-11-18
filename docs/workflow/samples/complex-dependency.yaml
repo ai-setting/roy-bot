@@ -1,0 +1,131 @@
+# Complex Dependency Graph
+#
+# Demonstrates complex dependency patterns:
+# - Multiple entry points
+# - Cross-branch dependencies
+# - Complex merge patterns
+#
+# Diagram:
+#
+#   entry-1 ─┬─→ branch-1a ─┐
+#            ├─→ branch-1b  │     ┌─→ final
+#   entry-2 ─┼─→ branch-2a ─┼─→ cross-dep ─┬─→ merge-1
+#            └─→ branch-2b ─┘               └─→ merge-1
+
+name: complex-dependency-graph
+version: "1.0"
+description: Complex dependency graph with multiple entry points and cross-branch dependencies
+
+metadata:
+  author: Roy Agent
+  tags:
+    - complex
+    - dependency
+    - multi-entry
+
+nodes:
+  # ========== Entry Points ==========
+  - id: entry-1
+    type: tool
+    name: Entry Point 1
+    config:
+      tool: echo
+      message: "Entry 1 started"
+    depends_on: []
+
+  - id: entry-2
+    type: tool
+    name: Entry Point 2
+    config:
+      tool: echo
+      message: "Entry 2 started"
+    depends_on: []
+
+  # ========== Branch 1 (from Entry 1) ==========
+  - id: branch-1a
+    type: tool
+    name: Branch 1A
+    config:
+      tool: calculator
+      operation: branch-1a
+    depends_on:
+      - entry-1
+
+  - id: branch-1b
+    type: tool
+    name: Branch 1B
+    config:
+      tool: calculator
+      operation: branch-1b
+    depends_on:
+      - entry-1
+
+  # ========== Branch 2 (from Entry 2) ==========
+  - id: branch-2a
+    type: tool
+    name: Branch 2A
+    config:
+      tool: validator
+      operation: validate-2a
+    depends_on:
+      - entry-2
+
+  - id: branch-2b
+    type: tool
+    name: Branch 2B
+    config:
+      tool: validator
+      operation: validate-2b
+    depends_on:
+      - entry-2
+
+  # ========== Cross-Branch Dependency ==========
+  # This node depends on both branch-1a AND branch-2a
+  # demonstrating cross-branch dependencies
+  - id: cross-dep
+    type: tool
+    name: Cross-Branch Processing
+    config:
+      tool: calculator
+      operation: cross-branch
+    depends_on:
+      - branch-1a
+      - branch-2a
+
+  # ========== Merge Point ==========
+  - id: merge-1
+    type: merge
+    name: Merge Results
+    config:
+      strategy: collect
+    depends_on:
+      - branch-1b
+      - branch-2b
+      - cross-dep
+
+  # ========== Final Processing ==========
+  - id: final
+    type: tool
+    name: Final Processing
+    config:
+      tool: echo
+      message: "Complex dependency workflow complete"
+    depends_on:
+      - merge-1
+
+outputs:
+  - name: branch_1_results
+    source: branch-1a
+    path: result
+
+  - name: branch_2_results
+    source: branch-2a
+    path: result
+
+  - name: cross_branch_result
+    source: cross-dep
+    path: result
+
+  - name: merged_results
+    source: merge-1
+    path: inputs

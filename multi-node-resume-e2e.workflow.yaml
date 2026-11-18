@@ -1,0 +1,87 @@
+name: multi-node-resume-e2e
+version: "1.0"
+description: |
+  Multi-node DAG (agentNode + toolNode + agentNode + end) for CLI resume E2E test.
+  Flow: start (echo) -> agent-1 (ask_user) -> tool-1 (echo) -> agent-2 (ask_user) -> end (echo)
+  Used by workflow-cli.test.ts to verify --session option.
+
+  Fresh run:
+    bun packages/cli/dist/bin/roy-bot.js workflow run multi-node-resume-e2e.workflow.yaml --file --input '{"userName":"e2e-user"}'
+  Resume agent-1:
+    bun packages/cli/dist/bin/roy-bot.js workflow run multi-node-resume-e2e --session workflow_<runId> --input "Yes"
+  Resume agent-2:
+    bun packages/cli/dist/bin/roy-bot.js workflow run multi-node-resume-e2e --session workflow_<runId> --input "Approve"
+
+entry: start
+
+config:
+  parallel_limit: 1
+  timeout: 180000
+
+nodes:
+  - id: start
+    type: tool
+    name: Start
+    config:
+      tool: echo
+      message: "multi-node-resume-e2e: started for user={{input.userName}}"
+
+  - id: agent-1
+    type: agent
+    name: Agent 1 (first confirm)
+    config:
+      agent_type: general
+      options:
+        maxIterations: 5
+      prompt: |
+        You are workflow step agent-1. Do not use any tools except ask_user.
+
+        Step 1 (required on first turn): Call ask_user exactly once with:
+          query: "[agent-1] Proceed for user {{input.userName}}?"
+          options: ["Yes", "No"]
+
+        Step 2 (after user responds): Reply with exactly one line:
+          AGENT_1: <the user's answer>
+
+        Do not skip Step 1. Do not call bash or other tools.
+    depends_on:
+      - start
+
+  - id: tool-1
+    type: tool
+    name: Tool 1 (between agents)
+    config:
+      tool: echo
+      message: "tool-1: completed after agent-1 confirmation"
+    depends_on:
+      - agent-1
+
+  - id: agent-2
+    type: agent
+    name: Agent 2 (second confirm)
+    config:
+      agent_type: general
+      options:
+        maxIterations: 5
+      prompt: |
+        You are workflow step agent-2. Do not use any tools except ask_user.
+
+        Step 1 (required on first turn): Call ask_user exactly once with:
+          query: "[agent-2] Approve final step for user {{input.userName}}?"
+          options: ["Approve", "Reject"]
+
+        Step 2 (after user responds): Reply with exactly one line:
+          AGENT_2: <the user's answer>
+
+        Do not skip Step 1. Do not call bash or other tools.
+    depends_on:
+      - tool-1
+
+  - id: end
+    type: tool
+    name: End
+    config:
+      tool: echo
+      message: "multi-node-resume-e2e: completed both agent confirmations"
+    depends_on:
+      - agent-2

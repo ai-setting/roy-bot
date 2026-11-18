@@ -1,0 +1,474 @@
+name: Publish Packages to npmjs.com
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (latest, beta, next)'
+        required: false
+        default: 'latest'
+        type: choice
+        options:
+          - latest
+          - beta
+          - next
+  release:
+    types: [published]
+
+env:
+  NODE_VERSION: "20"
+  PNPM_VERSION: "9"
+
+jobs:
+  # ============================================
+  # Job 1: 获取版本
+  # ============================================
+  prepare:
+    name: Prepare versions
+    runs-on: ubuntu-latest
+    outputs:
+      core_version: ${{ steps.versions.outputs.core_version }}
+      coder_version: ${{ steps.versions.outputs.coder_version }}
+      cli_version: ${{ steps.versions.outputs.cli_version }}
+      standalone_version: ${{ steps.versions.outputs.standalone_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Get versions
+        id: versions
+        run: |
+          CORE_VER=$(node -p 'require("./packages/core/package.json").version')
+          CODER_VER=$(node -p 'require("./packages/coder-harness/package.json").version')
+          CLI_VER=$(node -p 'require("./packages/cli/package.json").version')
+          STANDALONE_VER=$(node -p 'require("./packages/roy-bot-standalone/package.json").version')
+          echo "core_version=$CORE_VER" >> $GITHUB_OUTPUT
+          echo "coder_version=$CODER_VER" >> $GITHUB_OUTPUT
+          echo "cli_version=$CLI_VER" >> $GITHUB_OUTPUT
+          echo "standalone_version=$STANDALONE_VER" >> $GITHUB_OUTPUT
+          echo "## Package versions:"
+          echo "- core: $CORE_VER"
+          echo "- coder: $CODER_VER"
+          echo "- cli: $CLI_VER"
+          echo "- standalone: $STANDALONE_VER"
+
+  # ============================================
+  # Job 2: 构建所有包
+  # ============================================
+  build:
+    name: Build all packages
+    runs-on: ubuntu-latest
+    needs: prepare
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install pnpm
+        run: npm install -g pnpm@${{ env.PNPM_VERSION }}
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.13"
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Update workspace dependencies
+        run: |
+          CORE_VER="${{ needs.prepare.outputs.core_version }}"
+          CODER_VER="${{ needs.prepare.outputs.coder_version }}"
+          # Update coder-harness dependency on core
+          sed -i "s/\"@ai-setting\/roy-bot-core\": \"workspace:\*\"/\"@ai-setting\/roy-bot-core\": \"\${CORE_VER}\"/" packages/coder-harness/package.json
+          # Update cli dependencies
+          sed -i "s/\"@ai-setting\/roy-bot-core\": \"workspace:\*\"/\"@ai-setting\/roy-bot-core\": \"\${CORE_VER}\"/" packages/cli/package.json
+          sed -i "s/\"@ai-setting\/roy-bot-coder-harness\": \"workspace:\*\"/\"@ai-setting\/roy-bot-coder-harness\": \"\${CODER_VER}\"/" packages/cli/package.json
+
+      - name: Clean dist directories
+        run: |
+          rm -rf packages/core/dist
+          rm -rf packages/coder-harness/dist
+          rm -rf packages/cli/dist
+
+      - name: Build SDK packages
+        run: pnpm run build
+
+      - name: Build standalone binary
+        run: bun run build:cli:prod
+
+      - name: Verify standalone binaries
+        run: |
+          # 验证 build:cli:prod 自动复制了二进制文件
+          echo "Checking standalone/bin/ contents:"
+          ls -la packages/roy-bot-standalone/bin/
+          
+          # 验证版本号
+          echo ""
+          echo "Verifying binary versions:"
+          for binary in packages/roy-bot-standalone/bin/roy-bot-*; do
+            if [ -f "$binary" ] && [ ! "${binary##*.}" == "exe" ] || [ -f "${binary}.exe" ]; then
+              target="${binary}.exe"
+              [ -f "$target" ] || target="$binary"
+              if file "$target" | grep -q "ELF"; then
+                echo "  $(basename $target): $(timeout 1 $target --version 2>/dev/null || echo 'N/A')"
+              fi
+            fi
+          done
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-dist
+          path: |
+            packages/core/dist/
+            packages/coder-harness/dist/
+            packages/cli/dist/
+            packages/roy-bot-standalone/
+          retention-days: 1
+
+  # ============================================
+  # Job 3: 发布 core
+  # ============================================
+  publish-core:
+    name: Publish @ai-setting/roy-bot-core
+    runs-on: ubuntu-latest
+    needs: [prepare, build]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install pnpm
+        run: npm install -g pnpm@${{ env.PNPM_VERSION }}
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.13"
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Download built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: packages-dist
+          path: ./artifacts
+
+      - name: Copy built dist to package
+        run: cp -r artifacts/core/dist packages/core/dist
+
+      - name: Check and Publish to npm
+        run: |
+          CORE_VER="${{ needs.prepare.outputs.core_version }}"
+          echo "Checking @ai-setting/roy-bot-core@$CORE_VER..."
+          
+          # Check if version exists
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${{ secrets.NPM_TOKEN }}" \
+            "https://registry.npmjs.org/@ai-setting%2froy-bot-core/$CORE_VER")
+          
+          if [ "$HTTP_CODE" == "200" ]; then
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "⚠️  WARNING: @ai-setting/roy-bot-core@$CORE_VER already published"
+            echo "   Skipping publish (this is a warning, not an error)"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          else
+            echo "📦 Publishing @ai-setting/roy-bot-core@$CORE_VER..."
+            cd packages/core
+            echo '//registry.npmjs.org/:_authToken=${NPM_TOKEN}' > .npmrc
+            pnpm publish --access public --no-git-checks --tag ${{ inputs.tag || 'latest' }}
+          fi
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # ============================================
+  # Job 4: 发布 coder-harness
+  # ============================================
+  publish-coder-harness:
+    name: Publish @ai-setting/roy-bot-coder-harness
+    runs-on: ubuntu-latest
+    needs: [prepare, build, publish-core]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install pnpm
+        run: npm install -g pnpm@${{ env.PNPM_VERSION }}
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.13"
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Download built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: packages-dist
+          path: ./artifacts
+
+      - name: Copy built dist to package
+        run: |
+          cp -r artifacts/coder-harness/dist packages/coder-harness/dist
+
+      - name: Wait for core propagation
+        run: sleep 15
+
+      - name: Check and Publish to npm
+        run: |
+          CODER_VER="${{ needs.prepare.outputs.coder_version }}"
+          echo "Checking @ai-setting/roy-bot-coder-harness@$CODER_VER..."
+          
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${{ secrets.NPM_TOKEN }}" \
+            "https://registry.npmjs.org/@ai-setting%2froy-bot-coder-harness/$CODER_VER")
+          
+          if [ "$HTTP_CODE" == "200" ]; then
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "⚠️  WARNING: @ai-setting/roy-bot-coder-harness@$CODER_VER already published"
+            echo "   Skipping publish (this is a warning, not an error)"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          else
+            echo "📦 Publishing @ai-setting/roy-bot-coder-harness@$CODER_VER..."
+            cd packages/coder-harness
+            echo '//registry.npmjs.org/:_authToken=${NPM_TOKEN}' > .npmrc
+            pnpm publish --access public --no-git-checks --tag ${{ inputs.tag || 'latest' }}
+          fi
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # ============================================
+  # Job 5: 发布 cli SDK
+  # ============================================
+  publish-cli-sdk:
+    name: Publish @ai-setting/roy-bot-cli (SDK)
+    runs-on: ubuntu-latest
+    needs: [prepare, build, publish-coder-harness]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install pnpm
+        run: npm install -g pnpm@${{ env.PNPM_VERSION }}
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.13"
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Download built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: packages-dist
+          path: ./artifacts
+
+      - name: Copy built dist to package
+        run: |
+          cp -r artifacts/cli/dist packages/cli/dist
+
+      - name: Wait for coder-harness propagation
+        run: sleep 15
+
+      - name: Check and Publish CLI SDK to npm
+        run: |
+          CLI_VER="${{ needs.prepare.outputs.cli_version }}"
+          echo "Checking @ai-setting/roy-bot-cli@$CLI_VER..."
+          
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${{ secrets.NPM_TOKEN }}" \
+            "https://registry.npmjs.org/@ai-setting%2froy-bot-cli/$CLI_VER")
+          
+          if [ "$HTTP_CODE" == "200" ]; then
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            echo "⚠️  WARNING: @ai-setting/roy-bot-cli@$CLI_VER already published"
+            echo "   Skipping publish (this is a warning, not an error)"
+            echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          else
+            echo "📦 Publishing @ai-setting/roy-bot-cli@$CLI_VER (SDK)..."
+            cd packages/cli
+            echo '//registry.npmjs.org/:_authToken=${NPM_TOKEN}' > .npmrc
+            pnpm publish --access public --no-git-checks --tag ${{ inputs.tag || 'latest' }}
+          fi
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # ============================================
+  # Job 6: 发布 standalone 二进制
+  # ============================================
+  publish-standalone:
+    name: Publish @ai-setting/roy-bot-standalone (binary)
+    runs-on: ubuntu-latest
+    needs: [prepare, build]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: packages-dist
+          path: ./artifacts
+
+      - name: Check and Publish standalone to npm
+        run: |
+          STANDALONE_VER="${{ needs.prepare.outputs.standalone_version }}"
+          echo "=== Publishing @ai-setting/roy-bot-standalone@$STANDALONE_VER (standalone binary) ==="
+          
+          # Check if already published
+          echo "Checking if version exists on npm..."
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${{ secrets.NPM_TOKEN }}" \
+            "https://registry.npmjs.org/@ai-setting%2froy-bot-standalone/$STANDALONE_VER")
+          echo "HTTP Status: $HTTP_CODE"
+          
+          if [ "$HTTP_CODE" == "200" ]; then
+            echo "⚠️  Version $STANDALONE_VER already exists on npm, skipping publish"
+          else
+            echo ""
+            echo "=== Artifact verification ==="
+            echo "Checking artifacts/roy-bot-standalone/ contents:"
+            ls -la artifacts/roy-bot-standalone/
+            
+            if [ -d "artifacts/roy-bot-standalone/bin" ]; then
+              echo ""
+              echo "Binary files:"
+              ls -la artifacts/roy-bot-standalone/bin/
+              
+              echo ""
+              echo "Verifying binary version..."
+              if [ -f "artifacts/roy-bot-standalone/bin/roy-bot-linux-x64" ]; then
+                chmod +x artifacts/roy-bot-standalone/bin/roy-bot-linux-x64
+                ./artifacts/roy-bot-standalone/bin/roy-bot-linux-x64 --version
+              fi
+            else
+              echo "❌ ERROR: bin directory not found in artifacts!"
+              exit 1
+            fi
+            
+            echo ""
+            echo "=== Publishing ==="
+            cd artifacts/roy-bot-standalone
+            
+            # Verify version in package.json
+            echo "Package version in package.json:"
+            grep '"version"' package.json
+            
+            # Update version to ensure consistency
+            sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"$STANDALONE_VER\"/" package.json
+            echo "After sed:"
+            grep '"version"' package.json
+            
+            echo ""
+            echo '//registry.npmjs.org/:_authToken=${NPM_TOKEN}' > .npmrc
+            echo "Running npm publish..."
+            npm publish --access public --tag ${{ inputs.tag || 'latest' }}
+            echo ""
+            echo "=== Publish complete ==="
+          fi
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # ============================================
+  # Job 7: 发布总结
+  # ============================================
+  publish-summary:
+    name: Publish Summary
+    runs-on: ubuntu-latest
+    needs: [prepare, build, publish-core, publish-coder-harness, publish-cli-sdk]
+    if: always()
+
+    steps:
+      - name: Generate Summary
+        run: |
+          echo "# 📦 Publish Summary"
+          echo ""
+          echo "## Versions"
+          echo "| Package | Version |"
+          echo "|---------|---------|"
+          echo "| @ai-setting/roy-bot-core | ${{ needs.prepare.outputs.core_version }} |"
+          echo "| @ai-setting/roy-bot-coder-harness | ${{ needs.prepare.outputs.coder_version }} |"
+          echo "| @ai-setting/roy-bot-cli (SDK) | ${{ needs.prepare.outputs.cli_version }} |"
+          echo "| @ai-setting/roy-bot-standalone | ${{ needs.prepare.outputs.standalone_version }} |"
+          echo ""
+          echo "## Publish Status"
+          echo "| Package | Result |"
+          echo "|---------|--------|"
+          
+          if [ "${{ needs.publish-core.result }}" == "success" ]; then
+            echo "| @ai-setting/roy-bot-core | ✅ Published |"
+          else
+            echo "| @ai-setting/roy-bot-core | ⏭️  Skipped or Failed |"
+          fi
+          
+          if [ "${{ needs.publish-coder-harness.result }}" == "success" ]; then
+            echo "| @ai-setting/roy-bot-coder-harness | ✅ Published |"
+          else
+            echo "| @ai-setting/roy-bot-coder-harness | ⏭️  Skipped or Failed |"
+          fi
+          
+          if [ "${{ needs.publish-cli-sdk.result }}" == "success" ]; then
+            echo "| @ai-setting/roy-bot-cli (SDK) | ✅ Published |"
+          else
+            echo "| @ai-setting/roy-bot-cli (SDK) | ⏭️  Skipped or Failed |"
+          fi
+          
+          if [ "${{ needs.publish-standalone.result }}" == "success" ]; then
+            echo "| roy-bot (standalone) | ✅ Published |"
+          else
+            echo "| roy-bot (standalone) | ⏭️  Skipped or Failed |"
+          fi
+          
+          echo ""
+          echo "## Install Commands"
+          echo "```bash"
+          echo "# Install CLI SDK (npm package)"
+          echo "npm install @ai-setting/roy-bot-cli"
+          echo ""
+          echo "# Install standalone binary (via npx)"
+          echo "npx @ai-setting/roy-bot-standalone"
+          echo "# or"
+          echo "npm install -g @ai-setting/roy-bot-standalone"
+          echo "```"
+          echo ""
+          echo "## Notes"
+          echo "- Check the GitHub Actions log for detailed publish status"
+          echo "- ⚠️  Skipped = version already exists or check returned error"

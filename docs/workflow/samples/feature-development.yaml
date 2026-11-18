@@ -1,0 +1,343 @@
+# Feature Development Workflow
+#
+# Standard workflow for Feature development in roy-bot project
+# Following TDD and Git Worktree best practices
+#
+# Diagram:
+#
+#   init ─→ create-task ─→ load-worktree-skill ─→ create-worktree ─┐
+#                                                              │
+#   load-brainstorming ←─────────────────────────────────────────┤
+#         │                                                      │
+#         ▼                                                      │
+#   design-analysis ─→ load-tdd-skill ─→ write-failing-test ───→ │
+#                                                                    │
+#   implement-code ───────────────────────────────────────────────→ │
+#         │                                                         │
+#         ▼                                                         │
+#   run-unit-tests ─→ load-review-skill ─→ self-code-review ────→ │
+#                                                                    │
+#   run-build ─→ run-cli-tests ─→ load-verification-skill ──────→ │
+#                                                                    │
+#   merge-branch ─→ load-finishing-skill ─→ complete-task ──────→ final
+
+name: feature-development
+version: "1.0"
+description: Standard workflow for Feature development in roy-bot project with TDD and Git Worktree
+
+metadata:
+  author: Roy Agent
+  tags:
+    - feature
+    - development
+    - tdd
+    - worktree
+  usage: |
+    Execute this workflow when starting a new Feature development task.
+    Make sure to pass the feature description as input.
+
+nodes:
+  # ========== Step 1: Initialization ==========
+  - id: init
+    type: tool
+    name: Initialize Workflow
+    config:
+      tool: echo
+      message: "Starting Feature Development Workflow"
+    depends_on: []
+
+  # ========== Step 2: Create Task ==========
+  - id: create-task
+    type: skill
+    name: Create Task
+    config:
+      skill_name: task
+      action: create
+      params:
+        title: "{{input.feature_name}}"
+        description: "{{input.feature_description}}"
+        priority: "{{input.priority | default('medium')}}"
+        goals_and_expected_deliverables: "{{input.goals}}"
+    depends_on:
+      - init
+
+  - id: log-task-created
+    type: tool
+    name: Log Task Creation
+    config:
+      tool: echo
+      message: "Task created: {{create-task.task_id}}"
+    depends_on:
+      - create-task
+
+  # ========== Step 3: Load Worktree Skill ==========
+  - id: load-worktree-skill
+    type: skill
+    name: Load Worktree Skill
+    config:
+      skill_name: using-git-worktrees
+      action: load
+    depends_on:
+      - log-task-created
+
+  - id: create-worktree
+    type: skill
+    name: Create Worktree
+    config:
+      skill_name: using-git-worktrees
+      action: create
+      params:
+        branch_name: "{{input.branch_name | default('feature/' + input.feature_name | kebab)}}"
+        worktree_path: "{{input.worktree_path | default('.worktrees')}}"
+    depends_on:
+      - load-worktree-skill
+
+  - id: log-worktree-created
+    type: tool
+    name: Log Worktree
+    config:
+      tool: echo
+      message: "Worktree created: {{create-worktree.worktree_path}}"
+    depends_on:
+      - create-worktree
+
+  # ========== Step 4: Load Brainstorming Skill ==========
+  - id: load-brainstorming
+    type: skill
+    name: Load Brainstorming Skill
+    config:
+      skill_name: brainstorming
+      action: load
+    depends_on:
+      - log-worktree-created
+
+  - id: design-analysis
+    type: skill
+    name: Requirements Analysis
+    config:
+      skill_name: brainstorming
+      action: analyze
+      params:
+        requirements: "{{input.feature_description}}"
+    depends_on:
+      - load-brainstorming
+
+  - id: log-design-complete
+    type: tool
+    name: Log Design
+    config:
+      tool: echo
+      message: "Design analysis complete"
+    depends_on:
+      - design-analysis
+
+  # ========== Step 5: Load TDD Skill & Write Tests ==========
+  - id: load-tdd-skill
+    type: skill
+    name: Load TDD Skill
+    config:
+      skill_name: test-driven-development
+      action: load
+    depends_on:
+      - log-design-complete
+
+  - id: write-failing-test
+    type: tool
+    name: Write Failing Test
+    config:
+      tool: bash
+      command: "echo 'Write failing test for: {{input.feature_name}}'"
+    depends_on:
+      - load-tdd-skill
+
+  - id: log-test-written
+    type: tool
+    name: Log Test Written
+    config:
+      tool: echo
+      message: "Failing test written - TDD Red Phase"
+    depends_on:
+      - write-failing-test
+
+  # ========== Step 6: Implement Code ==========
+  - id: implement-code
+    type: tool
+    name: Implement Feature
+    config:
+      tool: bash
+      command: "echo 'Implementing feature: {{input.feature_name}}'"
+    depends_on:
+      - log-test-written
+
+  - id: run-unit-tests
+    type: tool
+    name: Run Unit Tests
+    config:
+      tool: bash
+      command: "bun test"
+    depends_on:
+      - implement-code
+
+  - id: check-tests-pass
+    type: condition
+    name: Check Tests Pass
+    config:
+      condition: "{{run-unit-tests.success}}"
+    depends_on:
+      - run-unit-tests
+
+  - id: log-unit-tests-pass
+    type: tool
+    name: Log Tests Pass
+    config:
+      tool: echo
+      message: "All unit tests passed - TDD Green Phase"
+    depends_on:
+      - check-tests-pass
+
+  # ========== Step 7: Code Review ==========
+  - id: load-review-skill
+    type: skill
+    name: Load Code Review Skill
+    config:
+      skill_name: requesting-code-review
+      action: load
+    depends_on:
+      - log-unit-tests-pass
+
+  - id: self-code-review
+    type: tool
+    name: Perform Code Review
+    config:
+      tool: bash
+      command: "echo 'Self code review for: {{input.feature_name}}'"
+    depends_on:
+      - load-review-skill
+
+  - id: log-review-complete
+    type: tool
+    name: Log Review Complete
+    config:
+      tool: echo
+      message: "Code review complete"
+    depends_on:
+      - self-code-review
+
+  # ========== Step 8: Build & CLI Tests ==========
+  - id: run-build
+    type: tool
+    name: Build CLI
+    config:
+      tool: bash
+      command: "bun run build:cli:dev:single"
+    depends_on:
+      - log-review-complete
+
+  - id: run-cli-tests
+    type: tool
+    name: Run CLI Tests
+    config:
+      tool: bash
+      command: |
+        packages/cli/dist/roy-bot-linux-x64/bin/roy --version && \
+        packages/cli/dist/roy-bot-linux-x64/bin/roy --help | head -20
+    depends_on:
+      - run-build
+
+  - id: load-verification-skill
+    type: skill
+    name: Load Verification Skill
+    config:
+      skill_name: verification-before-completion
+      action: load
+    depends_on:
+      - run-cli-tests
+
+  - id: log-verification-complete
+    type: tool
+    name: Log Verification
+    config:
+      tool: echo
+      message: "Verification complete - all tests passed"
+    depends_on:
+      - load-verification-skill
+
+  # ========== Step 9: Merge & Complete ==========
+  - id: merge-branch
+    type: skill
+    name: Merge Branch
+    config:
+      skill_name: finishing-a-development-branch
+      action: merge
+      params:
+        target_branch: main
+        cleanup: true
+    depends_on:
+      - log-verification-complete
+
+  - id: load-finishing-skill
+    type: skill
+    name: Load Finishing Skill
+    config:
+      skill_name: finishing-a-development-branch
+      action: load
+    depends_on:
+      - merge-branch
+
+  - id: complete-task
+    type: skill
+    name: Complete Task
+    config:
+      skill_name: task
+      action: complete
+      params:
+        task_id: "{{create-task.task_id}}"
+    depends_on:
+      - load-finishing-skill
+
+  - id: log-workflow-complete
+    type: tool
+    name: Log Completion
+    config:
+      tool: echo
+      message: "Feature Development Workflow Complete - Task: {{create-task.task_id}}"
+    depends_on:
+      - complete-task
+
+  # ========== Final Output ==========
+  - id: final
+    type: merge
+    name: Workflow Complete
+    config:
+      strategy: collect
+    depends_on:
+      - log-workflow-complete
+
+outputs:
+  - name: task_id
+    source: create-task
+    path: task_id
+
+  - name: worktree_path
+    source: create-worktree
+    path: worktree_path
+
+  - name: branch_name
+    source: create-worktree
+    path: branch_name
+
+  - name: test_status
+    source: run-unit-tests
+    path: success
+
+  - name: build_status
+    source: run-build
+    path: success
+
+  - name: cli_test_result
+    source: run-cli-tests
+    path: output
+
+  - name: workflow_complete
+    source: log-workflow-complete
+    path: message

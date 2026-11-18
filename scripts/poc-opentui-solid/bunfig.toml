@@ -1,0 +1,6 @@
+# PoC 专用 bunfig —— 只在这个目录生效（bun 会就近取用），
+# 避免影响主仓库的 bun 行为（尤其 React/Ink 的 JSX）。
+#
+# 照抄 opencode packages/tui/bunfig.toml 的做法：
+# @opentui/solid/preload 会注册 Solid JSX 的转译器（babel-preset-solid）。
+preload = ["@opentui/solid/preload"]

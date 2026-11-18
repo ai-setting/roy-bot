@@ -1,0 +1,2434 @@
+name: roy-rd-with-trace
+version: "1.5.0"
+description: >
+  R&D 研发工作流的 trace-first 变体 — 在 roy-rd-pipeline 的 9 节点骨架上，把"可调试性 / 可观测性"作为一等公民，贯穿 plan → implement → e2e → verify 四个阶段。
+
+  与 roy-rd-pipeline 的核心差异化点（trace 闭环）：
+
+    1. plan 阶段输出 expected_traces：识别核心代码/核心流程，规划预期 span_name、record 策略、关键出入参字段路径（颗粒度：字段形状，不锁死具体值）。
+    2. tdd-implement 阶段落地 @TracedAs：import 自 packages/core/src/env/log-trace/decorator.ts 的 TracedAs 注解；统一使用 @TracedAs，禁止 @Traced / @TracedLightweight；span_name 必须与 expected_traces 完全一致。
+    3. cli-e2e-test 阶段自动对照：用 `roy-bot debug trace <traceId>` / `roy-bot debug span <spanId>` 解析 spans.db（~/.config/roy-bot/spans.db），逐 expected_trace 做 4 步中粒度检查（span 存在性、name 精确一致、record_params=true 时的 key_params 字段形状、record_result=true 时的 key_result_fields 字段形状）。任意 expected_trace 失败 → trace_check_status=FAIL → cli_e2e_status=FAIL → 触发回环到 tdd-implement 重做。
+    4. final-verify 阶段轻量复验：再抽查 1-2 个 expected_traces 是否仍能在 spans.db 中查到（防止 e2e → merge 之间 trace 被破坏），checklist.trace_re_verified 必须为 true。
+
+  与 roy-rd-pipeline 共用：9 节点顺序、init-task / setup-worktree / code-review / merge-to-main / summary-report 五个节点完全复用；合并主分支铁律、auto_merge 决策树、worktree 保留等约束原样保留。
+
+  包含 9 个独立节点（串行执行，保证每阶段产物被下阶段读取）。
+
+  阶段 5"修复问题"是阶段 4 的失败回环（loop back），不是独立节点。
+    Phase 1  init-task         — 任务管理（task_search 找相似 + task_create + task_update active）
+    Phase 2.5 capture-baseline — v1.5.0 新增 — 集中捕获 pre-modification baseline（4 stage × N categories）
+    Phase 2  setup-worktree    — Worktree 隔离（git worktree add，幂等检查避免重复创建）
+    Phase 3  plan              — 设计与计划（brainstorming + writing-plans skills，输出 plan_doc + **expected_traces**）
+    Phase 4  tdd-implement     — TDD 严格循环 + **@TracedAs 落地**（输出 implemented_traces）
+    Phase 5  code-review       — Code Review（requesting-code-review skill，输出 BLOCKING/IMPORTANT/MINOR/NIT 分级；含 bun test 4 并发加速提示）
+    Phase 6  cli-e2e-test      — 命令行级 E2E + **Trace 对照**（输出 trace_check_status + trace_check_failures）
+    Phase 7  final-verify      — 最终验证 + **trace_re_verified**（verification-before-completion skill，9 项 checklist；含 bun test 4 并发加速提示）
+    Phase 8  merge-to-main     — 可选合并（agent: roy 调 bash 执行 git merge；auto_merge 必须显式 "true" 才执行；冲突自动 rebase；merge 后跑 build/test 验证 main 未被破坏；提交 JSON 输出 merge_status）
+    Phase 9  summary-report    — 总结报告（写入 reports/<task_id>-rd-summary.md + task_complete）
+
+  ⚠️ 合并主分支铁律：
+    - merge-to-main 节点的 `auto_merge` 参数必须显式为 "true" 才执行 merge
+    - 默认 "false"，节点会跳过 merge 并输出 MERGE_SKIPPED
+    - 即使 auto_merge=true，merge 前必须用 git merge-tree 预检冲突，冲突时自动 rebase 解决
+    - merge 后必须跑 build/test 验证 main 仍健康，否则回滚
+    - worktree 保留（不清理），等用户最终验收
+
+  与现有 workflow 的区别：
+    - feature-development: 缺 plan 节点、缺 code-review、merge-and-cleanup 不预检冲突
+    - feature-implementation / bug-investigation: 4 节点 PLAN/EXECUTE/VERIFY 模型，缺 worktree 隔离、CLI 级 e2e、可控 merge
+    - strict-task-agent-v522: 通用 PLAN/EXECUTE/VERIFY + resume gate，不是 R&D 专用模板
+
+  使用场景：所有 R&D 任务（feature / bug fix / refactor）均推荐使用此 workflow。
+
+  变更日志：
+    - v1.1.0: 移除 8 处 "CRITICAL — 必须调用 workflow_submit_output" 工具调用提醒，让 agentNode 依赖 output.mode=json 自动提取；tdd-implement Step 4.0.4 拆分为 4 个子场景（4.0.4.a self-loop / 4.0.4.b code-review / 4.0.4.c cli-e2e-test / 4.0.4.d final-verify），每个子场景含自约束（防 10 次空转）。
+    - v1.2.0: 新增 inputs.task_e2e_commands（任务相关真实 CLI E2E 命令清单）；plan 节点新增 task_e2e_commands 姊妹字段（与 expected_traces 并列）；cli-e2e-test 新增 Step 6.1.6（任务相关 CLI E2E + log/debug_trace/debug_span/combined 四种验证）+ Step 6.1.7（五阶段总判定），新增 schema 字段 task_e2e_status / task_e2e_commands_executed / task_e2e_discovered_count；final-verify checklist 9 → 10 项（新增 task-specific-e2e-passes 独立复跑）；cli-e2e-test + final-verify prompt 加 "Bun 跑 CLI 铁律" 段（防 __require 报错）。
+    - v1.3.0: 新增 Step 6.0.5 依赖前置检查（在 build/test 之前对任务涉及的 workflow YAML 跑静态依赖一致性检查，4 类 FAIL 信号：depends_on 节点缺失 / edges 节点缺失 / edges 与 depends_on 方向不一致 / entry 节点缺失；任一 FAIL → cli_e2e_status = "FAIL"，fail-fast）；用 `prescanWorkflowFile` from `packages/core/src/env/workflow/utils/dependency-prescan.ts`。Task #2241（re-verify Task #2240）。
+    - v1.4.0: 吸收 tongagent-rd-pipeline v1.1 baseline regression testing protocol。5 category（test/lint/typecheck/build/cli-smoke）；immutable baseline（一次性写入，多次复用，禁覆盖）；稳定 ID = `<category>:<file>:<symbol>:<line|errorCode>`，sorted+unique。新增 inputs.baseline_regression_enabled（默认 "true"，向后兼容）、inputs.lint_command、inputs.typecheck_command。tdd-implement / code-review / cli-e2e-test / final-verify 各加专属 baseline capture 步骤（Step 4.3.5 / 5.2.5 / 6.1.b1/t1/c1/m1 / 7.3.6）。**绝对零失败不是 PASS 条件**；pre-existing failures 不阻断；只看 baseline 外新增稳定 ID。fail-closed 规则：baseline 缺失/损坏/invocation_hash 不一致/命令集合漂移/capture 非零但 failures 为空/跨 worktree 切换/timeout 均 FAIL。Task #2302。
+    - v1.5.0: 新增 capture-baseline 节点（位置：setup-worktree → plan 之间），集中捕获 4 份 immutable baseline（按 stage 分类：tdd / review / e2e / verify），写入中央 manifest `/tmp/$TASK_ID-central-baseline.json`。下游 4 节点（tdd-implement / code-review / cli-e2e-test / final-verify）改为读中央 manifest + 仅 capture modified（不再各自 capture baseline）。**重要**：保持 invocation_hash 兼容性 — 每份 baseline 用对应 stage 的 categories，保证下游 modified.invocation_hash == baseline.invocation_hash（避免 verify 脚本 command_set_drift 失败）。向后兼容：baseline_regression_enabled=false 仍可工作（capture-baseline 写空 manifest）。不修改 capture_roy_rd_baseline.py / verify_roy_rd_baseline.py 脚本本身。scripts/capture_roy_rd_baseline.py + scripts/verify_roy_rd_baseline.py 路径约定不变。Task #2369。
+config:
+  parallel_limit: 1
+  timeout: 1800000
+  maxIterations: 10
+  loopEnabled: true
+nodes:
+  - id: init-task
+    type: agent
+    name: "Phase 1: 任务管理 (task_search → task_create → task_update active)"
+    config:
+      agent_type: roy
+      output:
+        mode: json
+        schema:
+          type: object
+          description: 任务管理结果 — task_id 给后续节点使用
+          properties:
+            task_id:
+              type: integer
+            task_type:
+              type: string
+            branch:
+              type: string
+            worktree_path:
+              type: string
+            similar_tasks_referenced:
+              type: array
+              items:
+                type: integer
+          required:
+            - task_id
+            - task_type
+            - branch
+            - worktree_path
+      prompt: >
+        ## Phase 1: 任务管理
+
+
+        任务类型: {{input.task_type}}
+
+        任务标题: {{input.task_title}}
+
+        任务描述: {{input.task_description}}
+
+
+        ### Step 1.1: 搜索相似任务（强建议）
+
+        - 调用 task_search(keywords=["{{input.task_type}}",
+        "{{input.branch_name}}"], limit=5) 找相似历史任务
+
+        - 如果找到（如 #1770 plugin emit notification / #1993 install package-json /
+        #1975 ask-user-timeout），
+          在 task description 里追加引用 "参考任务: #XXX, #YYY"，供后续节点阅读
+        - 推荐相似任务模式（来自上一周 R&D 实践）：
+            - Feature: 多子任务（T-A 到 T-H），TDD + 集成测试 + build
+            - Bug fix: 根因调查 → RED 失败测试 → GREEN 最小修复 → CLI 实际复现 → build
+            - Refactor: 移除旧机制 + 重写 + typecheck + build 验证
+
+        ### Step 1.2: 创建任务
+
+        - 调用 task_create(
+            title="{{input.task_title}}",
+            description="{{input.task_description}}",
+            type="normal",
+            priority="{{input.task_priority}}",
+            tags=["{{input.task_type}}", "rd-pipeline", "{{input.branch_name}}"{{#if input.task_tags}}, {{input.task_tags}}{{/if}}]
+          )
+        - task_update(status="active", progress=5)
+
+        - task_operation_create(action_type="create", action_title="Task created
+        via roy-rd-pipeline v1.2")
+
+
+        ### Step 1.3: 写入 context（关键，给后续节点用）
+
+        - 调用 task_update(
+            task_id=<返回的 task_id>,
+            context='{"worktree_path": "{{input.project_path}}/.worktrees/{{input.branch_name}}",
+                      "branch": "{{input.task_type}}/{{input.branch_name}}",
+                      "task_type": "{{input.task_type}}",
+                      "base_branch": "{{input.base_branch}}",
+                      "pipeline_version": "1.0"}'
+          )
+
+        ### Step 1.4: 输出
+
+        输出以下 JSON（系统会自动提取）：
+
+        ```json
+
+        {
+          "task_id": <number>,
+          "task_type": "{{input.task_type}}",
+          "branch": "{{input.task_type}}/{{input.branch_name}}",
+          "worktree_path": "{{input.project_path}}/.worktrees/{{input.branch_name}}",
+          "similar_tasks_referenced": [<task_ids>]
+        }
+
+        ```
+
+        - `task_id` 是后续所有节点读取任务状态的核心 ID
+        - **不要**用普通文本输出
+    depends_on: []
+  - id: setup-worktree
+    type: tool
+    name: "Phase 2: Worktree 隔离 (git worktree add，幂等检查)"
+    config:
+      tool: bash
+      command: >
+        set -eu
+
+        cd {{input.project_path}}
+
+
+        BRANCH="{{input.task_type}}/{{input.branch_name}}"
+
+        WORKTREE_PATH=".worktrees/{{input.branch_name}}"
+
+
+        # 幂等检查：worktree 已存在则跳过
+
+        if git worktree list | grep -q "$WORKTREE_PATH"; then
+          echo "WORKTREE_EXISTS: $WORKTREE_PATH"
+          echo "BRANCH: $BRANCH"
+          exit 0
+        fi
+
+
+        # 验证 base_branch 存在
+
+        if ! git rev-parse --verify "{{input.base_branch}}" >/dev/null 2>&1;
+        then
+          echo "ERROR: base_branch '{{input.base_branch}}' not found"
+          exit 1
+        fi
+
+
+        # 验证 branch 不与现有分支冲突
+
+        if git rev-parse --verify "$BRANCH" >/dev/null 2>&1; then
+          echo "ERROR: branch '$BRANCH' already exists; pick a different branch_name"
+          exit 2
+        fi
+
+
+        git worktree add "$WORKTREE_PATH" -b "$BRANCH" "{{input.base_branch}}"
+
+        echo "WORKTREE_CREATED: $WORKTREE_PATH"
+
+        echo "BRANCH: $BRANCH"
+
+        echo "BASE: {{input.base_branch}}"
+    depends_on:
+      - init-task
+  - id: capture-baseline
+    type: tool
+    name: "Phase 2.5: Capture pre-modification baseline (centralized, v1.5.0 新增)"
+    config:
+      tool: bash
+      command: |
+        set -eu
+        cd {{input.project_path}}/.worktrees/{{input.branch_name}}
+
+        TASK_ID="{{nodes.init-task.task_id}}"
+
+        if [ -z "$TASK_ID" ]; then
+          echo "ERROR: TASK_ID is required (from init-task node)"
+          exit 1
+        fi
+
+        # baseline_regression_enabled check (向后兼容)
+        if [ "{{input.baseline_regression_enabled}}" != "true" ]; then
+          echo "BASELINE_DISABLED"
+          mkdir -p "/tmp"
+          cat > "/tmp/$TASK_ID-central-baseline.json" <<EOF
+        {"task_id": $TASK_ID, "baseline_status": "DISABLED", "captured_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)", "worktree_path": "$(pwd)", "baseline_files": {}}
+        EOF
+          exit 0
+        fi
+
+        # 关键设计：每个下游节点 (tdd/review/e2e/verify) 都需要 invocation_hash 兼容的 baseline
+        # 因此 capture-baseline 节点按 stage 分类捕获 4 个 baseline 文件
+        # 每个 baseline 文件用对应 stage 的 categories，保证下游节点 modified.invocation_hash == baseline.invocation_hash
+        declare -A BASELINE_FILES
+        for stage in tdd review e2e verify; do
+          case "$stage" in
+            tdd)    categories="test,lint,typecheck";;
+            review) categories="test,lint,typecheck";;
+            e2e)    categories="build,test,cli-smoke";;
+            verify) categories="test,lint,typecheck,build,cli-smoke";;
+          esac
+
+          baseline_out="/tmp/$TASK_ID-baseline-$stage.json"
+          python3 scripts/capture_roy_rd_baseline.py \
+            --stage "$stage" \
+            --category "$categories" \
+            --task-id "$TASK_ID" \
+            --out "$baseline_out"
+
+          BASELINE_FILES[$stage]="$baseline_out"
+        done
+
+        # Write central manifest
+        mkdir -p "/tmp"
+        cat > "/tmp/$TASK_ID-central-baseline.json" <<EOF
+        {
+          "task_id": $TASK_ID,
+          "baseline_status": "SUCCESS",
+          "captured_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+          "worktree_path": "$(pwd)",
+          "baseline_files": {
+            "tdd": "${BASELINE_FILES[tdd]}",
+            "review": "${BASELINE_FILES[review]}",
+            "e2e": "${BASELINE_FILES[e2e]}",
+            "verify": "${BASELINE_FILES[verify]}"
+          }
+        }
+        EOF
+
+        echo "BASELINE_CAPTURED: $(ls -la /tmp/$TASK_ID-baseline-*.json 2>/dev/null | wc -l) files"
+        echo "CENTRAL_MANIFEST: /tmp/$TASK_ID-central-baseline.json"
+        cat "/tmp/$TASK_ID-central-baseline.json"
+    output:
+      mode: json
+      schema:
+        type: object
+        description: Central baseline capture result — baseline_status 决定下游 baseline verify 步骤是否执行
+        properties:
+          baseline_status:
+            type: string
+            description: '"SUCCESS" | "DISABLED" | "FAIL"'
+          task_id:
+            type: integer
+          captured_at:
+            type: string
+          worktree_path:
+            type: string
+          baseline_files:
+            type: object
+            description: 按 stage 分类的 baseline 文件路径清单
+            properties:
+              tdd:
+                type: string
+              review:
+                type: string
+              e2e:
+                type: string
+              verify:
+                type: string
+        required:
+          - baseline_status
+          - task_id
+    depends_on:
+      - setup-worktree
+
+  - id: plan
+    type: agent
+    name: "Phase 3: Plan (brainstorming + writing-plans skills)"
+    config:
+      agent_type: roy
+      output:
+        mode: json
+        schema:
+          type: object
+          description: Plan 阶段产物 — plan_doc 路径给 summary-report 引用；expected_traces 是 trace 闭环的起点
+          properties:
+            plan_doc:
+              type: string
+            estimated_files:
+              type: array
+              items:
+                type: string
+            tdd_test_count:
+              type: integer
+            risks:
+              type: array
+              items:
+                type: string
+            expected_traces:
+              type: array
+              description: 计划阶段识别的核心代码 trace 形状清单 — tdd-implement 据此加 @TracedAs，cli-e2e-test 据此对照实际 trace
+              items:
+                type: object
+                properties:
+                  function:
+                    type: string
+                    description: 完整限定名（ClassName.methodName 或 functionName）
+                  file_path:
+                    type: string
+                    description: 绝对路径
+                  span_name:
+                    type: string
+                    description: 用于 @TracedAs(name=...) 的自定义 span 名
+                  record_params:
+                    type: boolean
+                  record_result:
+                    type: boolean
+                  key_params:
+                    type: array
+                    description: 关键入参字段路径（如 ["input.email", "options.region"]）
+                    items:
+                      type: string
+                  key_result_fields:
+                    type: array
+                    description: 关键出参字段路径
+                    items:
+                      type: string
+                  rationale:
+                    type: string
+                    description: 为什么这个函数值得打 trace（一句话）
+            task_e2e_commands:
+              type: array
+              description: |
+                任务相关的真实 CLI E2E 命令清单（与 expected_traces 并列）。
+                每条是完整 bun 命令字符串（直接子命令 / interactive / act 三选一）。
+                纯文档/chore 任务留空数组。
+              default: []
+              items:
+                type: object
+                properties:
+                  command:
+                    type: string
+                    description: 完整 bun 命令（含 bun 前缀）
+                  scenario:
+                    type: string
+                    description: '场景描述（auto-discovered from git diff / 直接子命令 / interactive / act）'
+                  validation_method:
+                    type: string
+                    description: '"log" | "debug_trace" | "debug_span" | "combined"（缺省 "combined"）'
+                  expected_signal:
+                    type: string
+                    description: log 模式要 grep 的关键字
+          required:
+            - plan_doc
+            - estimated_files
+            - tdd_test_count
+            - risks
+            - expected_traces
+            - task_e2e_commands
+      prompt: |
+        ## Phase 3: Plan（设计与计划）
+
+        工作目录: {{input.project_path}}/.worktrees/{{input.branch_name}}
+        任务 ID: {{nodes.init-task.task_id}}
+        任务类型: {{input.task_type}}
+        分支: {{input.task_type}}/{{input.branch_name}}
+
+        ### Step 3.0: 加载 skills（强制）
+        - skill("brainstorming") — 设计先行，避免过早写代码
+        - skill("writing-plans") — 结构化计划文档模板
+        - 如果是 bug 修复：额外加载 skill("systematic-debugging") 做根因调查
+
+        ### Step 3.1: 调研（必须有，不能跳过）
+        - 用 glob / grep / read_file 探索 worktree 内相关代码
+        - 读取 task_search 找到的相似任务（如 #1770, #1993, #1975, #1838, #1960）作为参考模式
+        - 列出关键文件路径（必须精确到行号或符号）
+
+        ### Step 3.2: 编写计划文档
+        - 在 worktree 内创建 docs/superpowers/plans/<YYYY-MM-DD>-<topic>-plan.md
+        - 必须包含以下小节：
+            ## 目标
+            ## 验收标准（至少 5 条可验证项）
+            ## 涉及文件清单（精确路径）
+            ## TDD 步骤（RED/GREEN/REFACTOR 具体内容）
+            ## 风险与依赖
+            ## 完成定义（DoD）
+
+        ### Step 3.2.5: Trace 规划（核心新增 — trace 闭环起点）
+
+        识别本次任务涉及的核心代码 / 核心流程，列出每个值得打 trace 的函数。
+
+        判定标准（满足任一即为"核心"）：
+        - 跨包/跨模块的入口函数（被多个调用方依赖）
+        - 涉及 IO/网络/文件/数据库的关键路径
+        - 业务关键路径上的转换/校验函数（参数错误易导致 silent failure）
+        - 复杂算法入口（trace 用于回放与对照）
+
+        对每个核心函数定义：
+        - function: 完整限定名（ClassName.methodName 或 functionName）
+        - file_path: worktree 内绝对路径
+        - span_name: 自定义清晰的名字（用 @TracedAs('xxx.yyy', ...) 的第一个参数）
+        - record_params: 是否记录入参（推荐 true，除非含敏感字段）
+        - record_result: 是否记录出参（推荐 true，便于调试）
+        - key_params / key_result_fields: 关键的字段路径列表（颗粒度：字段形状，不锁死具体值）
+        - rationale: 一句话说明为什么
+
+        ⚠️ 所有 trace 一律用 @TracedAs，不用 @Traced / @TracedLightweight。
+        ⚠️ span_name 命名建议：domain.action（如 "user.create", "config.reload", "http.fetch"）
+
+        如果本次任务**没有**核心代码可打 trace（例如纯文档/纯配置改动），expected_traces 写空数组 `[]` 并在 risks 中说明 "no core code changes, trace check skipped"。
+
+        ### Step 3.3: 记录计划（扩充）
+        - task_operation_create(
+            action_type="milestone",
+            action_title="PLAN completed: <one-line summary>",
+            action_description=<plan_doc path + 关键决策点>
+          )
+        - 追加 task_operation_create(
+            action_type="milestone",
+            action_title="PLAN expected_traces: <N> items",
+            action_description=<expected_traces 完整 JSON 数组>
+          )
+        - task_update(progress=15)
+
+        ### Step 3.4: 任务相关 CLI E2E 规划（v1.2.0 新增）
+
+        识别本次任务涉及的**真实 CLI 入口**（不只是 smoke 启动），列出每条需要执行的 E2E 命令。
+        cli-e2e-test 节点的 Step 6.1.6 会按此清单执行并验证。
+
+        **判定标准（满足任一即应列入 task_e2e_commands）**：
+        - 本次任务**新增 / 修改了 CLI 子命令**（packages/cli/src/commands/ 下加新文件 / 改命令）
+        - 本次任务**新增 / 修改了 interactive 模式入口**（cli.ts / interactive.ts）
+        - 本次任务**新增 / 修改了 act 自然语言触发场景**（act command 的 trigger 解析逻辑）
+        - 本次任务**改了 CLI 解析 / 输出格式**（参数解析、ansi 渲染、错误处理路径）
+        - 本次任务**新增 / 修改了 debug 命令**（debug trace / debug span 等）
+
+        **覆盖三类入口**（按本次任务实际改动类型挑）：
+
+        1. **直接子命令**：
+           ```bash
+           bun packages/cli/dist/bin/roy-bot.js <command> [args]
+           # 例：bun packages/cli/dist/bin/roy-bot.js tasks get 1
+           ```
+
+        2. **interactive 模式**：
+           ```bash
+           bun packages/cli/dist/bin/roy-bot.js interactive --es <scenario_name>
+           ```
+
+        3. **act 自然语言**：
+           ```bash
+           bun packages/cli/dist/bin/roy-bot.js act "<触发场景的指令>"
+           ```
+
+        对每条命令填：
+        - command：完整 bun 命令字符串
+        - scenario：场景描述（"auto-discovered from git diff" / "新增 X 子命令" / "修改 Y 参数解析" 等）
+        - validation_method：`"log"` / `"debug_trace"` / `"debug_span"` / `"combined"`（缺省 `"combined"`）
+        - expected_signal：log 模式要 grep 的关键字（如 "task created" / "interactive started"）
+
+        **跳过条件**：纯文档 / 纯配置改动（无任何 CLI 代码改动）→ task_e2e_commands 写空数组 `[]`。
+        cli-e2e-test 会自动跳过 Step 6.1.6（task_e2e_status = "PASS"），不影响整体判定。
+
+        ### Step 3.5: 输出
+
+        输出以下 JSON（系统会自动提取）：
+
+        ```json
+        {
+          "plan_doc": "docs/superpowers/plans/<date>-<topic>-plan.md",
+          "estimated_files": [<absolute paths>],
+          "tdd_test_count": <预计写的失败测试数>,
+          "risks": [<关键风险>],
+          "expected_traces": [
+            {
+              "function": "ClassName.methodName",
+              "file_path": "<absolute path>",
+              "span_name": "domain.action",
+              "record_params": true,
+              "record_result": true,
+              "key_params": ["input.email", "options.region"],
+              "key_result_fields": ["status", "user.id"],
+              "rationale": "跨包入口函数，参数错误易导致 silent failure"
+            }
+          ],
+          "task_e2e_commands": [
+            {
+              "command": "bun packages/cli/dist/bin/roy-bot.js <command> [args]",
+              "scenario": "<场景描述>",
+              "validation_method": "log | debug_trace | debug_span | combined",
+              "expected_signal": "<log 模式 grep 关键字>"
+            }
+          ]
+        }
+        ```
+
+        - **不要**用普通文本输出
+        ⚠️ 如果是 refactor 任务，必须明确写出 "保留什么 / 移除什么 / 重写什么" 三段，避免大爆炸重写。
+    depends_on:
+      - setup-worktree
+  - id: tdd-implement
+    type: agent
+    name: "Phase 4: TDD 严格循环 (RED → GREEN → REFACTOR)"
+    config:
+      agent_type: roy
+      output:
+        mode: json
+        schema:
+          type: object
+          description: TDD 循环结果 — tdd_status 决定下游分支（PASS→code-review / FAIL→self-loop 重做）；implemented_traces 验证 @TracedAs 落地
+          properties:
+            tdd_status:
+              type: string
+              description: '"PASS" 表示 TDD 循环完成可进入 review；"FAIL" 表示触发 self-loop 回环重做'
+            test_count_added:
+              type: integer
+              description: 本次新增测试数
+            test_count_passing:
+              type: integer
+              description: 通过的测试数
+            pre_existing_failures:
+              type: integer
+              description: 已知 main 上的 pre-existing 失败数（不算回归）
+            files_modified:
+              type: array
+              description: 修改的文件绝对路径列表
+              items:
+                type: string
+            commits:
+              type: array
+              description: 本次提交的 commit hash 列表
+              items:
+                type: string
+            blocking_findings_addressed:
+              type: array
+              description: |
+                本轮 TDD 对 code-review 回环 blocking findings 的逐项处理报告。
+                仅当本次为 back-edge re-entry（`nodes.code-review.review_status == "NEEDS_FIX"`）时填写；
+                首次执行或 review PASS 时留空数组。每项含 id / status / note。
+              items:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    description: finding 摘要或前 80 字符的简短 ID
+                  status:
+                    type: string
+                    description: '"addressed" | "not_addressed" | "not_applicable"'
+                  note:
+                    type: string
+                    description: 处理说明（做了什么 / 为什么未处理）
+            implemented_traces:
+              type: array
+              description: 实际应用的 @TracedAs 列表 — 应与 plan 阶段 expected_traces 一一对应
+              items:
+                type: object
+                properties:
+                  function:
+                    type: string
+                  file_path:
+                    type: string
+                  span_name:
+                    type: string
+                  decorator:
+                    type: string
+                    description: '统一为 "@TracedAs"'
+                  code_snippet:
+                    type: string
+                    description: 加注解那几行代码（最多 500 字符）
+                  commit_hash:
+                    type: string
+                  matches_expected:
+                    type: boolean
+                    description: span_name 是否与 plan 阶段一致
+          required:
+            - tdd_status
+            - test_count_added
+            - test_count_passing
+            - files_modified
+            - commits
+            - implemented_traces
+          baseline_meta:
+            type: object
+            description: v1.4.0 + v1.5.0 — baseline/modified 元数据（v1.5.0 复用 capture-baseline 节点产物）
+            properties:
+              baseline_path:
+                type: string
+                description: baseline 文件路径（v1.5.0：从中央 manifest 读出）
+              modified_path:
+                type: string
+              invocation_hash:
+                type: string
+              baseline_source:
+                type: string
+                description: '"central-manifest"（v1.5.0 新增 — 由 capture-baseline 节点提供）'
+            new_regressions:
+              type: object
+              description: v1.4.0 + v1.5.0 — baseline 外新增稳定 failure/warning ID
+      prompt: >
+        ## Phase 4: TDD 严格循环
+
+
+        工作目录: {{input.project_path}}/.worktrees/{{input.branch_name}}
+
+        任务 ID: {{nodes.init-task.task_id}}
+
+
+        ### Step 4.0: 加载 skills（强制）
+
+        - skill("test-driven-development") — TDD 铁律：先 RED 再 GREEN 再 REFACTOR
+
+        - skill("verification-before-completion") — 完成前必须跑测试验证
+
+
+        ### Step 4.0.4: Back-edge re-entry feedback（强制，如适用）
+
+        本节点可能被 4 种 back-edge 触发重新执行（source output 已由 engine 通过 back-edge
+        source-preserve filter 保留，因此 `{{nodes.<source-id>.<field>}}` 模板可直接消费上一轮输出）：
+
+        - **a) self-loop**：上次 tdd-implement 自己 FAIL → 本节点重做
+        - **b) code-review**：review_status == NEEDS_FIX → 本节点修复 blocking 后重做
+        - **c) cli-e2e-test**：cli_e2e_status == FAIL → 本节点修复 build/test/cli_smoke/trace_check 后重做
+        - **d) final-verify**：verify_status == FAIL → 本节点修复 9 项 checklist 失败项后重做
+
+        **首次执行时**（`{{nodes.tdd-implement.tdd_status}}` 不存在），跳过整个 4.0.4 节，
+        `blocking_findings_addressed` 留空数组 `[]`。
+
+        ---
+
+        #### Step 4.0.4.a: self-loop（tdd-implement → tdd-implement，FAIL→self）
+
+        - **检测**：`{{nodes.tdd-implement.tdd_status}} == 'FAIL'`（首次执行时该变量不存在）
+        - **处理**：
+          - 读取本节点上一轮 output：`fail_reason` / `pre_existing_failures` / `test_count_passing`
+            / `test_count_failed` 等字段，分析上次为何 fail。
+          - 如 fail_reason 指向具体测试名 / 文件，本轮必须针对修复并新增 commit。
+          - 如 fail_reason 为 "no progress: HEAD unchanged ..."（说明上一轮已触发自约束并主动 FAIL），
+            必须彻底改变修复策略（不能重复同一尝试）。
+        - **自约束（防 10 次空转）**：
+          - 如果 `git rev-parse HEAD` 与上一轮 output `commits[]` 最后一项 commit **相同**，且
+            `fail_reason` 描述的失败仍然存在：
+            **`tdd_status` 必须为 "FAIL"**，并在 output `fail_reason` 中说明
+            "no progress: HEAD unchanged after self-loop re-entry"。
+
+        ---
+
+        #### Step 4.0.4.b: code-review → tdd-implement（NEEDS_FIX）
+
+        - **检测**：`{{nodes.code-review.review_status}}` 存在且 == "NEEDS_FIX"
+        - **处理**：
+          - 拉取最近一次 review op：`task_operation_list(task_id=<task_id>, action_type="review",
+            limit=1)`，从最近一条 op 的 `action_description` 取出完整 review JSON（schema 字段见
+            Step 5.3：`review_status` / `severity.{blocking,important,minor,nit}` / `recommendation`
+            / `commits_reviewed`）。
+          - 必须显式读取并处理：
+            - `severity.blocking` — 逐项解决或标注 not_applicable
+            - `severity.important` / `severity.minor` — 尽力处理
+            - `recommendation` — 改进建议
+            - `commits_reviewed` — 之前 review 的 commit 列表
+          - 对每条 `blocking` finding，本轮必须：
+            1. 实际写代码 / 加测试修复，commit 形成新 SHA；或
+            2. 在 Step 4.5 输出 schema 的 `blocking_findings_addressed` 数组里逐项报告：
+               `{"id": "<finding 摘要或前 80 字符>", "status": "addressed|not_addressed|not_applicable", "note": "<做了什么>"}`
+        - **自约束（防 10 次空转）**：
+          - 如果 `git rev-parse HEAD` 与 `commits_reviewed` 最新 commit **相同**，且
+            `severity.blocking` 仍非空、且未在 `blocking_findings_addressed` 中全部标
+            `addressed` 或 `not_applicable`：
+            **`tdd_status` 必须为 "FAIL"**，禁止 PASS；并在 output `fail_reason` 中说明
+            "no progress: HEAD unchanged after review feedback consumed but no commits added"。
+
+        ---
+
+        #### Step 4.0.4.c: cli-e2e-test → tdd-implement（FAIL）
+
+        - **检测**：`{{nodes.cli-e2e-test.cli_e2e_status}} == 'FAIL'`
+        - **处理**：
+          - 通过 `task_operation_list(task_id=<task_id>, action_type="milestone", limit=10)`
+            找 `action_title` 含 "CLI E2E:" 的 milestone，解析 `action_description` 取得上一轮
+            完整 JSON（schema 字段见 Step 6.2：`cli_e2e_status` / `build_ok` / `build_exit_code` /
+            `test_ok` / `test_exit_code` / `cli_smoke_ok` / `cli_smoke_exit_code` / `fail_reason` /
+            `build_log_tail` / `test_log_tail` / `cli_log_tail` / `trace_check_status` /
+            `trace_check_failures`）。
+          - 读取 `fail_reason` 定位失败阶段：
+            - `"build failed"` → 修复编译错误（看 `build_log_tail`）
+            - `"test failed"` → 修复失败的测试（看 `test_log_tail`）
+            - `"cli smoke failed"` → 修复 CLI 启动 / `--help` 行为（看 `cli_log_tail`）
+            - `"trace check failed"` → 给缺漏的 expected_trace 补 `@TracedAs` decorator（看
+              `trace_check_failures` 逐项）
+          - 如果 `trace_check_status == 'FAIL'`，每条 finding 必须在本轮修复（参考 4.0.4.b 的
+            blocking 处理模式），输出到 `blocking_findings_addressed` 数组：
+            `{"id": "<expected_span_name>", "status": "addressed|not_applicable", "note": "..."}`
+          - 必须实际修复并形成新 commit，否则 `tdd_status` 必须为 "FAIL"。
+        - **自约束（防 10 次空转）**：
+          - 如果 `git rev-parse HEAD` 与本节点上一轮 output `commits[]` 最后一项 commit **相同**，
+            且 `cli_e2e_status` 仍 FAIL：
+            **`tdd_status` 必须为 "FAIL"**，并在 output `fail_reason` 中说明
+            "no progress: HEAD unchanged after cli-e2e FAIL consumed but no commits added"。
+
+        ---
+
+        #### Step 4.0.4.d: final-verify → tdd-implement（FAIL）
+
+        - **检测**：`{{nodes.final-verify.verify_status}} == 'FAIL'`
+        - **处理**：
+          - 通过 `task_operation_list(task_id=<task_id>, action_type="review", limit=10)`
+            找 `action_title` 含 "Final verify:" 的 review op，解析 `action_description` 取得上一轮
+            完整 JSON（schema 字段见 Step 7.6：`verify_status` / `checklist` 9 项布尔 /
+            `failed_items` 数组 / `evidence` 含 `build_exit_code` / `test_exit_code` /
+            `cli_smoke_exit_code` / `trace_re_verified_spans` / `spans_db_path`）。
+          - 读取 `failed_items` 列出具体失败 checklist 项（共 9 项：`goals_verified` /
+            `plan_doc_verified` / `evidence_collected` / `no_obvious_issues` / `review_passed` /
+            `build_passes` / `tests_pass` / `cli_smoke_passes` / `trace_re_verified`）。
+          - 读取 `checklist` 9 项逐项状态，对 `false` 项针对性修复。
+          - 读取 `evidence` — `build_exit_code` / `test_exit_code` / `cli_smoke_exit_code` 非零即失败。
+          - 必须实际修复并形成新 commit，否则 `tdd_status` 必须为 "FAIL"。
+        - **自约束（防 10 次空转）**：
+          - 如果 `git rev-parse HEAD` 与本节点上一轮 output `commits[]` 最后一项 commit **相同**，
+            且 `verify_status` 仍 FAIL：
+            **`tdd_status` 必须为 "FAIL"**，并在 output `fail_reason` 中说明
+            "no progress: HEAD unchanged after final-verify FAIL consumed but no commits added"。
+
+        ---
+
+        **字段可用性说明**：4.0.4.b / 4.0.4.c / 4.0.4.d 中，source node 的输出由 engine 通过
+        back-edge source-preserve filter 保证可见（见 engine.ts 1405-1415），可使用
+        `{{nodes.<source-id>.<field>}}` 模板直接读取。如个别字段因 schema 演化缺失，**退化**为
+        `task_operation_list` + 解析 `action_description` JSON 的方式获取（已在每节"处理"中
+        给出 fallback 命令）。
+
+
+        ### Step 4.1: RED（先写失败测试）
+
+        - 在 worktree 内写至少 1 个失败测试（推荐 2-3 个，覆盖边界）
+
+        - 跑测试确认失败 — 必须是功能缺失的失败，不是 typo 错
+
+        - task_operation_create(action_type="progress", action_title="RED:
+        failing test added")
+
+        - task_update(progress=30)
+
+
+        ### Step 4.2: GREEN（最小代码让测试通过）
+
+        - 实现最小代码（不要 over-engineer）
+
+        - 跑测试确认通过
+
+        - task_operation_create(action_type="progress", action_title="GREEN:
+        minimal fix implemented")
+
+        - task_update(progress=50)
+
+
+        ### Step 4.3: REFACTOR
+
+        - 提取辅助函数 / 改进命名 / 移除死代码
+
+        - 测试保持绿色（每次 refactor 后跑一次）
+
+        - task_operation_create(action_type="milestone", action_title="REFACTOR complete")
+
+        - task_update(progress=65)
+
+        ### Step 4.3.5: Trace 落地（核心新增 — @TracedAs 应用）
+
+        读取 plan 阶段的 expected_traces：
+        - 通过 `task_operation_list(task_id=<task_id>)` 找 `action_title="PLAN expected_traces: ..."` 的 milestone，提取 `action_description` 中的 JSON 数组。
+        - 如果 expected_traces 为空数组（纯文档/纯配置任务），跳过本步骤，implemented_traces 留空数组。
+
+        对每个 expected_trace，在对应函数上加 @TracedAs 注解：
+        - 导入路径：实际项目里 `packages/core` 的导出路径（推荐用 grep/read_file 确认 import 形态，常见 `from "@/env/log-trace/decorator"` 或 `from "../../env/log-trace/decorator"`）。
+        - 用法：
+          ```ts
+          import { TracedAs } from "<实际路径>";
+
+          @TracedAs('<span_name>', { recordParams: <bool>, recordResult: <bool> })
+          public async <name>(...): Promise<...> { ... }
+          ```
+        - ⚠️ span_name 必须与 expected_traces 完全一致（用于 cli-e2e 对照）
+        - ⚠️ 如果原函数已有 `@Traced` 或 `@TracedLightweight`，**替换**为 `@TracedAs` 并用 expected_traces 里的 span_name 作为 name 参数
+        - ⚠️ 禁止新增 `@Traced` / `@TracedLightweight`（统一 `@TracedAs`）
+
+        如果 plan 中某个 expected_trace 因技术原因无法实现（如函数不存在/已重构），在 implemented_traces 中仍记录，但 `matches_expected: false` 并在 code_snippet 写明原因（如 "function removed in refactor"）。
+
+        - task_update(progress=70)
+
+        ### ⚡ Bun test 提示（统一使用 --parallel=4）
+
+        本项目 `bun test` **统一使用 `--parallel=4` 模式**：
+
+        ```bash
+        bun test <package_path> --parallel=4
+        # 例：bun test packages/core --parallel=4
+        # 例：bun test packages/cli --parallel=4
+        # 例：bun test tests/cli --parallel=4
+        ```
+
+        **📌 关键约束：必须先跑 baseline，再跑修改后**
+
+        1. **跑 baseline（main 分支基线）**：
+           - checkout 到 main 或 `git stash` 暂存所有修改
+           - 跑 `bun test <package_path> --parallel=4`
+           - 记录 baseline 失败列表（fail_test_names）和通过数
+
+        2. **跑修改后测试**：
+           - 恢复你的修改（或重新跑）
+           - 跑 `bun test <package_path> --parallel=4`
+           - 记录修改后失败列表和通过数
+
+        3. **对比判定**：
+           - ✅ PASS：修改后失败列表 == baseline 失败列表（甚至更少）
+           - ❌ FAIL：修改后引入了 baseline 没有的新失败
+
+        **重要原则**：
+        - 只看"是否引入新错误"，不要被 baseline 已有的失败误导
+        - baseline 已存在的失败是已知的，不算 regression
+        - 如果不确定，先跑一次 baseline 确认 pre-existing 失败列表
+
+
+        ### Step 4.3.6: Baseline regression 验证（v1.4.0 + v1.5.0 核心 — 读中央 manifest）
+
+        仅当 `{{input.baseline_regression_enabled}}` == "true" 时执行。
+        baseline 已由 capture-baseline 节点集中捕获（/tmp/$TASK_ID-central-baseline.json），
+        本节点只需 capture modified + 读中央 baseline verify。
+
+        **步骤 1 — 读中央 manifest 取 baseline 路径**：
+        ```bash
+        TASK_ID="{{nodes.init-task.task_id}}"
+        if [ ! -f "/tmp/$TASK_ID-central-baseline.json" ]; then
+          echo "ERROR: central baseline manifest not found (capture-baseline node 失败?)"
+          exit 1
+        fi
+        BASELINE_FILE=$(jq -r .baseline_files.tdd /tmp/$TASK_ID-central-baseline.json)
+        ```
+
+        **步骤 2 — Capture modified（仅 modified；不重新 capture baseline）**：
+        ```bash
+        mkdir -p reports/
+        python3 scripts/capture_roy_rd_baseline.py \
+          --stage tdd \
+          --category test,lint,typecheck \
+          --task-id "$TASK_ID" \
+          --out reports/$TASK_ID-tdd-modified-failures.json
+        ```
+
+        **步骤 3 — Verify set-diff**：
+        ```bash
+        python3 scripts/verify_roy_rd_baseline.py \
+          --baseline "$BASELINE_FILE" \
+          --modified reports/$TASK_ID-tdd-modified-failures.json
+        ```
+        `new_regressions[category] = sorted(modified.failures[category]) - sorted(baseline.failures[category])`。
+
+        **步骤 4 — Fail-Closed Rules**：
+        - 读不到 central manifest → tdd_status = "FAIL"
+        - baseline 文件不存在 / 损坏 / parse fail → tdd_status = "FAIL"
+        - invocation_hash 不一致 → tdd_status = "FAIL"
+        - modified 缺失 baseline 存在的 category key → tdd_status = "FAIL"
+        - capture exit 非零但 modified.failures 为空 → tdd_status = "FAIL"
+        - 跨 worktree 切换 / capture timeout → tdd_status = "FAIL"
+
+        **绝对零失败不是 PASS 条件**；pre-existing failures 不阻断；只看 baseline 外新增稳定 ID。
+        invocation_hash 兼容性由 capture-baseline 节点保证（同 stage + 同 categories → 相同 hash）。
+
+        **对比 v1.4.0**：
+        - v1.4.0：本节点既跑 baseline capture 又跑 modified capture（2 次）
+        - v1.5.0：本节点只跑 modified capture（1 次），baseline 复用 capture-baseline 节点产物
+        - 节省时间：~50%（避免 baseline 在 4 个节点重复 capture）
+
+        ### Step 4.4: 跑全套测试 + 记录（扩充）
+
+        - 执行 {{input.test_command}}
+
+        - 记录新增失败 vs pre-existing failures（已知 main 上存在的失败不算回归）
+
+        - task_operation_create(
+            action_type="milestone",
+            action_title="TDD cycle complete",
+            action_description="新增 <N> 测试，<M> 通过，<K> pre-existing failures 已文档化"
+          )
+
+        - 追加 task_operation_create(
+            action_type="milestone",
+            action_title="TDD implemented_traces: <N> @TracedAs applied",
+            action_description=<implemented_traces 完整 JSON 数组>
+          )
+
+        ### Step 4.5: 输出
+
+        输出以下 JSON（系统会自动提取，**这是触发 loop 机制的关键**）：
+
+        ```json
+
+        {
+          "tdd_status": "PASS" | "FAIL",
+          "test_count_added": <n>,
+          "test_count_passing": <n>,
+          "pre_existing_failures": <n>,
+          "files_modified": [<absolute paths>],
+          "commits": [<commit hashes>],
+          "blocking_findings_addressed": [
+            {
+              "id": "<finding 摘要或前 80 字符>",
+              "status": "addressed|not_addressed|not_applicable",
+              "note": "<做了什么 / 为什么未处理>"
+            }
+          ],
+          "implemented_traces": [
+            {
+              "function": "ClassName.methodName",
+              "file_path": "<absolute path>",
+              "span_name": "domain.action",
+              "decorator": "@TracedAs",
+              "code_snippet": "@TracedAs('domain.action', { recordParams: true, recordResult: true })\npublic async methodName(...) {...}",
+              "commit_hash": "<hash>",
+              "matches_expected": true
+            }
+          ]
+        }
+
+        ```
+
+        - `tdd_status` 决定下游分支："PASS" → 进入 code-review；"FAIL" → 触发 self-loop 回环到
+        tdd-implement 重做
+
+        - `implemented_traces` 是 cli-e2e-test 节点的对照清单（expected ↔ actual）
+
+        - `blocking_findings_addressed` 仅在 back-edge re-entry 时填写；首次执行或 review PASS
+          时留空数组 []。
+
+
+        ⚠️ 铁律：每个 commit 必须 atomic、独立可 revert、message 遵守 feat:/fix:/refactor: 前缀。
+    depends_on:
+      - plan
+  - id: code-review
+    type: agent
+    name: "Phase 5: Code Review (BLOCKING/IMPORTANT/MINOR/NIT 分级)"
+    config:
+      agent_type: roy
+      output:
+        mode: json
+        schema:
+          type: object
+          description: Code review 结果 — review_status 决定下游分支（PASS→cli-e2e-test /
+            NEEDS_FIX→tdd-implement 修复）
+          properties:
+            review_status:
+              type: string
+              description: '"PASS" 表示 review 通过；"NEEDS_FIX" 表示有 blocking 问题，触发回环到
+                tdd-implement'
+            severity:
+              type: object
+              properties:
+                blocking:
+                  type: array
+                  items:
+                    type: string
+                important:
+                  type: array
+                  items:
+                    type: string
+                minor:
+                  type: array
+                  items:
+                    type: string
+                nit:
+                  type: array
+                  items:
+                    type: string
+            test_coverage:
+              type: string
+            api_design:
+              type: string
+            recommendation:
+              type: string
+            commits_reviewed:
+              type: array
+              items:
+                type: string
+          required:
+            - review_status
+            - severity
+            - commits_reviewed
+          baseline_meta:
+            type: object
+            description: v1.4.0 + v1.5.0 — baseline/modified 元数据（v1.5.0 复用 capture-baseline 节点产物）
+            properties:
+              baseline_path:
+                type: string
+                description: baseline 文件路径（v1.5.0：从中央 manifest 读出）
+              modified_path:
+                type: string
+              invocation_hash:
+                type: string
+              baseline_source:
+                type: string
+                description: '"central-manifest"（v1.5.0 新增 — 由 capture-baseline 节点提供）'
+            new_regressions:
+              type: object
+              description: v1.4.0 + v1.5.0 — baseline 外新增稳定 failure/warning ID
+      prompt: >
+        ## Phase 5: Code Review
+
+
+        工作目录: {{input.project_path}}/.worktrees/{{input.branch_name}}
+
+        任务 ID: {{nodes.init-task.task_id}}
+
+        对比基准: {{input.base_branch}}...HEAD
+
+
+        ### Step 5.0: 加载 skills（强制）
+
+        - skill("requesting-code-review") — review checklist + 输出格式
+
+
+        ### Step 5.1: 收集 diff
+
+        - `git diff {{input.base_branch}}...HEAD --stat` — 文件级改动统计
+
+        - `git diff {{input.base_branch}}...HEAD` — 实际代码改动
+
+        - `git log {{input.base_branch}}..HEAD --oneline` — commit 列表
+
+
+        ### Step 5.2: 审查维度
+
+        - **功能正确性**：是否满足 plan 文档中的所有验收标准？
+
+        - **测试覆盖**：是否有 RED 测试 / 边界用例 / 反向断言？
+
+        - **API 设计**：命名清晰 / 参数合理 / 向后兼容？
+
+        - **代码质量**：类型安全 / 错误处理 / 无死代码 / 无遗留 TODO？
+
+        - **文档同步**：plan 文档 / README / JSDoc 是否同步更新？
+
+        - **铁律检查**：未直接 commit 到 main / 未破坏既有测试 / commit message 合规？
+
+
+        ### ⚡ Bun test 提示（统一使用 --parallel=4）
+
+        本项目 `bun test` **统一使用 `--parallel=4` 模式**：
+
+        ```bash
+        bun test <package_path> --parallel=4
+        # 例：bun test packages/core --parallel=4
+        # 例：bun test packages/cli --parallel=4
+        # 例：bun test tests/cli --parallel=4
+        ```
+
+        **📌 关键约束：必须先跑 baseline，再跑修改后**
+
+        1. **跑 baseline（main 分支基线）**：
+           - checkout 到 main 或 `git stash` 暂存所有修改
+           - 跑 `bun test <package_path> --parallel=4`
+           - 记录 baseline 失败列表（fail_test_names）和通过数
+
+        2. **跑修改后测试**：
+           - 恢复你的修改（或重新跑）
+           - 跑 `bun test <package_path> --parallel=4`
+           - 记录修改后失败列表和通过数
+
+        3. **对比判定**：
+           - ✅ PASS：修改后失败列表 == baseline 失败列表（甚至更少）
+           - ❌ FAIL：修改后引入了 baseline 没有的新失败
+
+        **重要原则**：
+        - 只看"是否引入新错误"，不要被 baseline 已有的失败误导
+        - baseline 已存在的失败是已知的，不算 regression
+        - 如果不确定，先跑一次 baseline 确认 pre-existing 失败列表
+
+
+        ### Step 5.2.6: Baseline regression 复审（v1.4.0 + v1.5.0 核心 — 读中央 manifest）
+
+        仅当 `{{input.baseline_regression_enabled}}` == "true" 时执行。
+        baseline 已由 capture-baseline 节点集中捕获，本节点只 capture modified + 读中央 verify。
+
+        **步骤 1 — 读中央 manifest 取 baseline 路径**：
+        ```bash
+        TASK_ID="{{nodes.init-task.task_id}}"
+        BASELINE_FILE=$(jq -r .baseline_files.review /tmp/$TASK_ID-central-baseline.json)
+        ```
+
+        **步骤 2 — Capture modified（test category）**：
+        ```bash
+        python3 scripts/capture_roy_rd_baseline.py \
+          --stage review \
+          --category test \
+          --task-id "$TASK_ID" \
+          --out reports/$TASK_ID-review-modified-failures.json
+        ```
+
+        **步骤 3 — Verify set-diff**：
+        ```bash
+        python3 scripts/verify_roy_rd_baseline.py \
+          --baseline "$BASELINE_FILE" \
+          --modified reports/$TASK_ID-review-modified-failures.json
+        ```
+        `new_regressions[test] = sorted(modified.test) - sorted(baseline.test)`。
+        非空 → 每个 ID 追加 "regression: test:<id>" 到 severity.blocking。
+
+        **步骤 4 — Fail-Closed Rules**：
+        - 读不到 central manifest / baseline 文件缺失 / 损坏 → review_status = "NEEDS_FIX"
+        - invocation_hash 不一致 → review_status = "NEEDS_FIX"
+        - capture exit 非零但 modified.failures 为空 → review_status = "NEEDS_FIX"
+
+        **绝对零失败不是 PASS 条件**；pre-existing failures 不阻断。
+        invocation_hash 兼容性由 capture-baseline 节点保证。
+
+        ### Step 5.3: 分级输出
+
+        输出以下 JSON（系统会自动提取，**这是触发 loop 机制的关键**）：
+
+        ```json
+
+        {
+          "review_status": "PASS" | "NEEDS_FIX",
+          "severity": {
+            "blocking": [<必须立即修，否则阻断 merge 的问题>],
+            "important": [<应该修，但可以后续 PR>],
+            "minor": [<建议改进，不影响功能>],
+            "nit": [<纯风格 nit>]
+          },
+          "test_coverage": "<评估>",
+          "api_design": "<评估>",
+          "recommendation": "<改进建议或放行声明>",
+          "commits_reviewed": [<commit hashes>]
+        }
+
+        ```
+
+        - `review_status` 决定下游分支："PASS" → 进入 cli-e2e-test；"NEEDS_FIX" → 回环到
+        tdd-implement 重做
+
+
+        ### Step 5.4: 记录
+
+        - task_operation_create(
+            action_type="review",
+            action_title="Code review: <status>",
+            action_description=<完整 JSON>
+          )
+        - task_update(progress=75)
+
+
+        ### 关键规则
+
+        - 如果 blocking 数组非空 → review_status = "NEEDS_FIX"，下游 final-verify
+        节点会判定为失败并触发 loop back 到 tdd-implement
+
+        - 如果仅 important 数组非空 → review_status = "PASS"，但应在 summary 报告里记录为
+        follow-up
+
+        - 否则 → review_status = "PASS"
+    depends_on:
+      - tdd-implement
+  - id: cli-e2e-test
+    type: agent
+    name: "Phase 6: CLI E2E (build + unit tests + CLI smoke)"
+    config:
+      agent_type: roy
+      output:
+        mode: json
+        schema:
+          type: object
+          description: CLI E2E 验证结果 — cli_e2e_status 决定下游分支（PASS→final-verify / FAIL→tdd-implement 修复）；trace_check_status 校验 @TracedAs 实际落地
+          properties:
+            cli_e2e_status:
+              type: string
+              description: '"PASS" 表示 build/test/cli_smoke/trace_check 四阶段全部成功；"FAIL" 表示任一失败，触发回环到 tdd-implement'
+            build_ok:
+              type: boolean
+              description: build_command 是否 exit 0
+            build_exit_code:
+              type: integer
+            test_ok:
+              type: boolean
+              description: test_command 是否 exit 0
+            test_exit_code:
+              type: integer
+            test_count_passed:
+              type: integer
+              description: 通过的测试数（从 test log 解析）
+            test_count_failed:
+              type: integer
+              description: 失败的测试数（从 test log 解析）
+            cli_smoke_ok:
+              type: boolean
+              description: cli_smoke_command 是否 exit 0
+            cli_smoke_exit_code:
+              type: integer
+            fail_reason:
+              type: string
+              description: 任一阶段失败的原因描述（PASS 时为空）；trace check 失败时优先描述
+            build_log_tail:
+              type: string
+              description: build 日志末尾 10 行（用于 evidence）
+            test_log_tail:
+              type: string
+              description: test 日志末尾 20 行（用于 evidence）
+            cli_log_tail:
+              type: string
+              description: cli smoke 日志末尾 10 行（用于 evidence）
+            trace_check_status:
+              type: string
+              description: '"PASS" 表示所有 expected_traces 都对应上实际 span；"FAIL" 表示至少一个未找到或字段不匹配'
+            trace_check_failures:
+              type: array
+              description: 对照失败列表
+              items:
+                type: object
+                properties:
+                  expected_function:
+                    type: string
+                  expected_span_name:
+                    type: string
+                  actual_span_name:
+                    type: string
+                    description: 实际找到的 span（找不到则为空）
+                  issue:
+                    type: string
+                    description: '"span not found" | "span name mismatch" | "missing param field" | "missing result field" | "span db not found" | "no traces recorded"'
+                  details:
+                    type: string
+            task_e2e_status:
+              type: string
+              description: '"PASS" / "FAIL" — 所有 task_e2e_commands 都执行成功且验证命中'
+            task_e2e_commands_executed:
+              type: array
+              description: 实际执行的任务相关命令清单（含 auto-discovered）
+              items:
+                type: object
+                properties:
+                  command:
+                    type: string
+                  scenario:
+                    type: string
+                  validation_method:
+                    type: string
+                  expected_signal:
+                    type: string
+                  exit_code:
+                    type: integer
+                  log_tail:
+                    type: string
+                  validation_passed:
+                    type: boolean
+                  validation_details:
+                    type: string
+            task_e2e_discovered_count:
+              type: integer
+              description: 从 git diff / task operations 反推发现的"遗漏"命令数
+            prescan_status:
+              type: string
+              description: 'v1.3.0 新增 — "PASS" / "FAIL" — Step 6.0.5 依赖前置检查结果（part A 环境依赖 + part B workflow YAML 一致性）'
+            prescan_findings:
+              type: array
+              description: 'v1.3.0 新增 — Step 6.0.5 产出的所有 finding 列表（part A 环境依赖问题 + part B workflow 一致性问题）'
+              items:
+                type: object
+                properties:
+                  part:
+                    type: string
+                    description: '"A"（环境依赖） / "B"（workflow 一致性）'
+                  severity:
+                    type: string
+                    description: '"FAIL" / "WARN"'
+                  source:
+                    type: string
+                    description: '"bun install" / "chalk missing" / "checkDependsOnNodesExist" / "checkEdgesNodesExist" / "checkEdgesDependsOnConsistency" / "checkEntryNodeExists"'
+                  message:
+                    type: string
+                  file:
+                    type: string
+                    description: 'B 部分时为 workflow YAML 路径'
+                  nodeIds:
+                    type: array
+                    items:
+                      type: string
+          required:
+            - cli_e2e_status
+            - build_ok
+            - test_ok
+            - cli_smoke_ok
+            - trace_check_status
+            - trace_check_failures
+            - task_e2e_status
+            - task_e2e_commands_executed
+          baseline_meta:
+            type: object
+            description: v1.4.0 + v1.5.0 — baseline/modified 元数据（v1.5.0 复用 capture-baseline 节点产物）
+            properties:
+              baseline_path:
+                type: string
+                description: baseline 文件路径（v1.5.0：从中央 manifest 读出）
+              modified_path:
+                type: string
+              invocation_hash:
+                type: string
+              baseline_source:
+                type: string
+                description: '"central-manifest"（v1.5.0 新增 — 由 capture-baseline 节点提供）'
+            new_regressions:
+              type: object
+              description: v1.4.0 + v1.5.0 — baseline 外新增稳定 failure/warning ID
+      prompt: >
+        ## Phase 6: CLI E2E（命令行级端到端验证）
+
+
+        工作目录: {{input.project_path}}/.worktrees/{{input.branch_name}}
+
+        任务 ID: {{nodes.init-task.task_id}}
+
+
+        ### ⚠️ Bun 跑 CLI 铁律（v1.2.0 新增 — 必修）
+
+        `packages/cli/dist/bin/roy-bot.js` 是 bun runtime 编译产物（含 `__require` polyfill），
+        **必须用 bun 跑**，禁止 bash 直接调或 node 跑，否则会崩：
+          TypeError: __require is not a function at new ProtocolResolver
+
+        ✅ 正确示例：
+          bun packages/cli/dist/bin/roy-bot.js <args>
+          bun run packages/cli/dist/bin/roy-bot.js <args>
+
+        ❌ 错误示例（必崩）：
+          直接调 shebang（bash 会走 node）→ 同样崩 `__require is not a function`
+          调用方用 `node` 而非 `bun`（例如 `node ./packages/cli/dist/bin/roy-bot.js ...`）→ 同样崩
+
+        本节点所有 CLI 调用（包括 cli_smoke_command + 任务相关 E2E + trace 调试）都必须遵守此铁律。
+
+        ### Step 6.0: 加载 skills（强制）
+
+        - skill("verification-before-completion") — 完成前必须独立跑所有验收命令
+
+
+        ### Step 6.0.5: 依赖前置检查（v1.3.0 新增 — fail-fast）
+
+        **目的**：在 build/test 之前，确保 (a) node_modules 完整（防止 Cannot find module chalk 等子依赖解析失败），
+        (b) workflow YAML 文件本身没有静态依赖不一致（4 类 FAIL 信号）。
+
+        **Part A — 环境依赖检查（bun install + chalk 校验）**
+
+        ```bash
+        cd {{input.project_path}}/.worktrees/{{input.branch_name}}
+
+        # 1. 检查 node_modules 是否存在
+        if [ ! -d "node_modules" ]; then
+          echo "[Step 6.0.5] node_modules missing, running bun install..."
+          bun install 2>&1 | tee /tmp/rd_pipeline_bun_install.log | tail -20
+        fi
+
+        # 2. 校验关键子依赖（chalk 用于 ansi 渲染，缺失会立刻崩 CLI smoke）
+        if ! bun pm ls 2>/dev/null | grep -qE "^.*chalk@"; then
+          echo "[Step 6.0.5] chalk dependency missing, forcing fresh install..."
+          rm -rf node_modules bun.lockb 2>/dev/null
+          bun install 2>&1 | tee /tmp/rd_pipeline_bun_install_retry.log | tail -20
+        fi
+        ```
+
+        **失败重试规则**：任何阶段（build/test/cli_smoke）失败且 log 含 `Cannot find module` 字样 → 跑 `bun install` 后**重试该阶段一次**。
+        若重试仍失败 → 按常规 fail_reason 上报（不要因为依赖问题就让整个 workflow 永远 retry）。
+
+        **Part B — Workflow YAML 静态依赖一致性检查（prescan）**
+
+        对任务涉及的 workflow YAML 文件跑 4 类检查：
+        1. checkDependsOnNodesExist       — depends_on 节点 ID 是否都存在
+        2. checkEdgesNodesExist           — edges from/to 节点 ID 是否都存在
+        3. checkEdgesDependsOnConsistency — edges 目标节点的 depends_on 是否包含 from（fan-out/fan-in 反模式）
+        4. checkEntryNodeExists           — entry 节点是否存在
+
+        任何一个 FAIL → `prescan_status = "FAIL"`，`cli_e2e_status = "FAIL"`，fail-fast，跳过 build/test/cli_smoke/trace_check。
+
+        **步骤 1：取 workflow 文件清单**
+
+        从以下材料反推：
+        - `task_e2e_commands` 中所有包含 `.yaml` 路径的命令
+        - `git diff main..HEAD --stat -- '*.yaml' | grep workflow` 的改动文件
+
+        若清单为空 → 跳过 Part B，`prescan_status = "PASS"`。
+
+        **步骤 2：执行 prescan**
+
+        对每个 workflow YAML 文件：
+        ```bash
+        cd {{input.project_path}}/.worktrees/{{input.branch_name}}
+        bun -e '
+          const {prescanWorkflowFile} = require("./packages/core/dist/env/workflow/utils/dependency-prescan.js");
+          const files = {{input.workflow_files}};
+          let allOk = true;
+          for (const f of files) {
+            const r = prescanWorkflowFile(f);
+            console.log(f, r.ok ? "OK" : "FAIL");
+            if (!r.ok) { console.log(JSON.stringify(r.findings, null, 2)); allOk = false; }
+          }
+          if (!allOk) process.exit(1);
+        ' 2>&1 | tee /tmp/rd_pipeline_prescan.log
+        ```
+
+        **步骤 3：判定**
+
+        - 所有文件 ok === true → `prescan_status = "PASS"`
+        - 任一文件 ok === false → `prescan_status = "FAIL"`，`fail_reason` 写第一个失败文件的 findings
+
+        **对 cli_e2e_status 的影响**：`prescan_status = "FAIL"` → `cli_e2e_status = "FAIL"`，fail-fast，跳过 build/test/cli_smoke/trace_check。
+
+
+
+        ### Step 6.1.b1: Build baseline + modified capture（v1.4.0 + v1.5.0 — 读中央）
+
+        仅当 `{{input.baseline_regression_enabled}}` == "true" 时执行。
+        baseline 已由 capture-baseline 节点捕获（central manifest 的 e2e.baseline_files）。
+
+        **步骤 1 — 读中央 manifest 取 baseline 路径**：
+        ```bash
+        TASK_ID="{{nodes.init-task.task_id}}"
+        BASELINE_FILE=$(jq -r .baseline_files.e2e /tmp/$TASK_ID-central-baseline.json)
+        ```
+
+        **步骤 2 — Capture modified (build)**：
+        ```bash
+        python3 scripts/capture_roy_rd_baseline.py \
+          --stage e2e --category build \
+          --task-id "$TASK_ID" \
+          --out reports/$TASK_ID-e2e-build-modified-failures.json
+        ```
+
+        **步骤 3 — 执行 build（保存日志到 /tmp/rd_pipeline_build.log）**：
+        ```bash
+        {{input.build_command}}
+        ```
+
+        **步骤 4 — Verify set-diff**：
+        ```bash
+        python3 scripts/verify_roy_rd_baseline.py \
+          --baseline "$BASELINE_FILE" \
+          --modified reports/$TASK_ID-e2e-build-modified-failures.json
+        ```
+        new_regressions[build] 非空 → cli_e2e_status="FAIL"。
+
+        **步骤 5 — Fail-Closed Rules**：central manifest 缺失 / baseline 文件损坏 / invocation_hash 不一致 → 立即 FAIL。
+
+        ### Step 6.1.t1: Test baseline + modified capture（v1.4.0 + v1.5.0 — 读中央）
+
+        仅当 `{{input.baseline_regression_enabled}}` == "true" 且 build OK 时执行。
+        复用同一个 central baseline 文件（包含 build/test/cli-smoke 三 category）。
+
+        **步骤 1 — 读中央 manifest（同一个文件）**：
+        ```bash
+        BASELINE_FILE=$(jq -r .baseline_files.e2e /tmp/$TASK_ID-central-baseline.json)
+        ```
+
+        **步骤 2 — Capture modified (test)**：
+        ```bash
+        python3 scripts/capture_roy_rd_baseline.py \
+          --stage e2e --category test \
+          --task-id "$TASK_ID" \
+          --out reports/$TASK_ID-e2e-test-modified-failures.json
+        ```
+
+        **步骤 3 — 执行 test**：
+        ```bash
+        {{input.test_command}}
+        ```
+
+        **步骤 4 — Verify set-diff**：同 6.1.b1。
+        new_regressions[test] 非空 → cli_e2e_status="FAIL"。
+
+        ### Step 6.1.c1: CLI smoke baseline + modified capture（v1.4.0 + v1.5.0 — 读中央）
+
+        仅当 `{{input.baseline_regression_enabled}}` == "true" 且 build + test 都 OK 时执行。
+
+        **步骤 1 — 读中央 manifest**：
+        ```bash
+        BASELINE_FILE=$(jq -r .baseline_files.e2e /tmp/$TASK_ID-central-baseline.json)
+        ```
+
+        **步骤 2 — Capture modified (cli-smoke)**：
+        ```bash
+        python3 scripts/capture_roy_rd_baseline.py \
+          --stage e2e --category cli-smoke \
+          --task-id "$TASK_ID" \
+          --out reports/$TASK_ID-e2e-cli-smoke-modified-failures.json
+        ```
+
+        **步骤 3 — 执行 CLI smoke**：
+        ```bash
+        {{input.cli_smoke_command}}
+        ```
+
+        **步骤 4 — Verify set-diff**：同 6.1.b1。
+        new_regressions[cli-smoke] 非空 → cli_e2e_status="FAIL"。
+
+        ### Step 6.1.m1: 三段 aggregate diff（v1.4.0 收尾 — v1.5.0 复用）
+
+        仅当 `{{input.baseline_regression_enabled}}` == "true" 时执行。
+        汇总 new_regressions: { build: [...], test: [...], cli-smoke: [...] }。
+        任一 category 非空 → cli_e2e_status="FAIL"。
+        全部空 → baseline regression PASS，可继续 Step 6.1 原三阶段。
+
+        **重要**：v1.5.0 中 6.1.b1/t1/c1 都从中央 manifest 读同一个 baseline 文件（e2e stage），
+        不再各自 capture baseline（节省 3 次 capture）。
+
+        ### Step 6.1: 执行三个阶段（按顺序，前一阶段失败则跳过后续）
+
+        - **阶段 1: BUILD** — 在 worktree 内调用 bash 工具运行 `{{input.build_command}}`，
+          记录 exit code（保存日志到 /tmp/rd_pipeline_build.log，末尾 10 行嵌入 evidence）
+
+        - **阶段 2: UNIT TESTS** — 仅当 build 成功时执行，运行 `{{input.test_command}}`，
+          记录 exit code 与 pass/fail 数（保存日志到 /tmp/rd_pipeline_test.log，末尾 20 行嵌入 evidence）
+
+        - **阶段 3: CLI SMOKE** — 仅当 build + tests 都成功时执行，运行 `{{input.cli_smoke_command}}`，
+          记录 exit code（保存日志到 /tmp/rd_pipeline_cli.log，末尾 10 行嵌入 evidence）
+
+        - ⚠️ 任一阶段失败：立即停止后续阶段，cli_e2e_status 设为 FAIL，
+          fail_reason 填该阶段名称（如 "build failed" / "test failed" / "cli smoke failed"）
+
+        - 全部阶段成功：cli_e2e_status = "PASS"（待 Step 6.1.5 trace_check 复核）
+
+        ### Step 6.1.5: Trace 对照（核心新增 — 闭环验证）
+
+        **前置**：用 `task_operation_list(task_id=<task_id>)` 取 plan 阶段的 `expected_traces` JSON 数组（找 `action_title="PLAN expected_traces: ..."` 的 milestone）。
+
+        如果 expected_traces 是空数组（纯文档/纯配置任务）→ trace_check_status = "PASS"，trace_check_failures = []，跳过后续 trace 对照步骤。
+
+        否则执行下列步骤：
+
+        **Step 6.1.5.1：定位 spans DB**
+
+        ```bash
+        # 默认 spans.db 路径（与 LogTraceComponent 配置一致）
+        SPANS_DB=$(find ~/.config/roy-bot -name "spans.db" 2>/dev/null | head -1)
+        echo "SPANS_DB=$SPANS_DB"
+        ```
+
+        如果 `SPANS_DB` 为空 → trace_check_status = "FAIL"，所有 expected_traces 加入 failures（issue="span db not found"），跳过后续对照步骤。
+
+        **Step 6.1.5.2：列出最近的 trace_id**
+
+        ```bash
+        # bugfix (Task #2175)：旧版用 `SELECT DISTINCT trace_id FROM spans ORDER BY start_time DESC LIMIT 10`，
+        # 有两个 bug：(a) 表名 `spans` 是错的（实际是单数 `span`）；(b) `LIMIT 10` 时间窗太严格，
+        # 高频 background singleton (如 `task.background.stopProgressReporter`) 会挤掉真实 instrument span。
+        # 修复策略：用 span name 过滤，从源头排除 background singleton。
+        #
+        # Task #2177 review notes:
+        #   - D-3: python3 是硬依赖；缺失会让 EXPECTED_NAMES 为空 → WHERE name IN () → 空结果 → FAIL。
+        #     workflow runner 必须预装 python3；如缺失会在 trace_check 阶段失败（fail-loud 设计）。
+        #   - D-1: LIMIT 20 是安全上限；典型 expected_traces 只有 3-5 条。Time-window 限制已通过
+        #     按 span name 过滤替代（见上）。
+        #   - D-2: span name 安全假设：必须是 [a-zA-Z0-9._-]+ 字符（与 expected_traces.span_name
+        #     schema 一致），否则会被 SQL 注入或语法错误。当前所有 span name 均满足此假设。
+        command -v python3 >/dev/null 2>&1 || { echo "python3 required for trace_check SQL generation"; exit 1; }
+        EXPECTED_NAMES=$(echo '<expected_traces_json>' | python3 -c "import json,sys; d=json.load(sys.stdin); print(','.join('\"'+t['span_name']+'\"' for t in d))")
+        sqlite3 "$SPANS_DB" "SELECT DISTINCT trace_id FROM span WHERE name IN ($EXPECTED_NAMES) ORDER BY (SELECT MAX(start_time) FROM span s2 WHERE s2.trace_id = span.trace_id) DESC LIMIT 20"
+        ```
+
+        如果结果为空 → trace_check_status = "FAIL"，failures 每条 expected_trace 记录 issue="no traces recorded for any expected span name"，跳过后续对照步骤。
+
+        **Step 6.1.5.3：对每个 expected_trace 做中粒度对照**
+
+        对每个 trace_id（按时间倒序最多查 10 个），用以下命令查看所有 span：
+        ```bash
+        bun packages/cli/dist/bin/roy-bot.js debug trace <trace_id> --db "$SPANS_DB"
+        ```
+
+        匹配规则（按顺序）：
+        1. **span 存在性**：在 trace tree 中查找 `name == expected_span_name` 的 span
+           - 找不到 → 记录 failure `{ expected_function, expected_span_name, actual_span_name: "", issue: "span not found", details: "no span with this name in any of last 10 traces" }`
+        2. **span name 一致性**：确认 name 完全匹配（不允许 fuzzy match）
+           - 不匹配 → 记录 failure `{ ..., actual_span_name: <找到的 name>, issue: "span name mismatch" }`
+        3. **入参字段形状**（如果 `record_params=true`）：
+           - 用 `bun packages/cli/dist/bin/roy-bot.js debug span <spanId> --db "$SPANS_DB"` 取 attributes
+           - 检查 `key_params` 中的每个字段路径在 attributes 中是否出现（任意 trace 中任一匹配 span 满足即可）
+           - 缺失 → 记录 failure `{ ..., issue: "missing param field", details: "key_params field <X> not in span attributes" }`
+        4. **出参字段形状**（如果 `record_result=true`）：
+           - 类似入参检查，对 `key_result_fields` 验证
+           - 缺失 → 记录 failure `{ ..., issue: "missing result field", details: ... }`
+
+        **Step 6.1.5.4：判定**
+
+        - 所有 expected_traces 都通过对照 → trace_check_status = "PASS"，trace_check_failures = []
+        - 至少一个失败 → trace_check_status = "FAIL"，所有失败的 expected_traces 加入 trace_check_failures（**逐项记录不合并**）
+
+        ⚠️ 对照失败的 failure 必须**逐项**记录（每个 expected_trace + 每个失败 issue 单独一条）。
+        ⚠️ 颗粒度是"字段形状"，不锁死具体值。
+
+        **Step 6.1.5.5：影响 cli_e2e_status**
+
+        - 全部四阶段（build + tests + cli_smoke + trace_check）都成功 → cli_e2e_status = "PASS"
+        - 任一阶段失败 → cli_e2e_status = "FAIL"，fail_reason 优先写 trace check 失败的原因（如 "trace_check failed: 2 spans not found"）
+
+        ### Step 6.1.6: 任务相关 CLI E2E（v1.2.0 核心新增 — 验证改动真正生效）
+
+        **目的**：不只是 smoke 启动验证，必须真正执行改动/新增的命令，触发改动代码路径。
+
+        **步骤 1：取 task_e2e_commands 清单**
+
+        按优先级从以下来源读取：
+        1. `{{input.task_e2e_commands}}`（调用方显式传入）
+        2. plan milestone 的 `task_e2e_commands` 字段（用 `task_operation_list(task_id=<task_id>)` 找
+           `action_title="PLAN expected_traces: ..."` 的相邻 milestone）
+
+        若两源都为空数组 → 跳过整个 Step 6.1.6，`task_e2e_status = "PASS"`，`task_e2e_commands_executed = []`。
+
+        **步骤 2：识别改动点（防漏）**
+
+        从以下材料反推"任务到底改了哪些 CLI 入口"：
+        - `task_operation_list` 中 tdd-implement 节点的 milestone（哪些文件改了 / 哪些函数加了 @TracedAs）
+        - `git diff main..HEAD --stat`（本次任务改动的文件清单）
+        - plan_doc 的"Files to modify" / "新增 CLI 子命令"小节
+
+        与 task_e2e_commands 交叉对照，**如果发现遗漏的改动入口**，在执行清单里**追加一条 task_e2e_command**，scenario 写"auto-discovered from git diff"。
+
+        **步骤 3：执行所有命令（每条保存日志）**
+
+        对每条 task_e2e_command：
+        1. 保存完整命令到 `/tmp/rd_pipeline_task_e2e_<N>.cmd`
+        2. 执行：`cd {{input.project_path}}/.worktrees/{{input.branch_name}} && bun <command>`
+        3. 保存 stdout+stderr 到 `/tmp/rd_pipeline_task_e2e_<N>.log`
+        4. 记录 exit code
+
+        覆盖三种入口（按 plan 实际改动类型挑）：
+        - **直接子命令**：`bun packages/cli/dist/bin/roy-bot.js tasks get 1`
+        - **interactive 模式**：`bun packages/cli/dist/bin/roy-bot.js interactive --es <name>`
+        - **act 自然语言**：`bun packages/cli/dist/bin/roy-bot.js act "<触发场景的指令>"`
+
+        **步骤 4：三选一验证（写入 evidence）**
+
+        按 plan 中每条命令的 `validation_method` 字段：
+        - `"log"`：grep `expected_signal` 关键字，stdout/stderr 必须命中
+        - `"debug_trace"`：用 `bun packages/cli/dist/bin/roy-bot.js debug trace <最新 trace_id> --db "$SPANS_DB"` 查 trace tree 是否走通改动路径
+        - `"debug_span"`：用 `bun packages/cli/dist/bin/roy-bot.js debug span <span_id> --db "$SPANS_DB"` 查 attribute
+        - `"combined"`：组合验证（推荐用于关键改动）
+
+        若 validation_method 缺失：默认 `"combined"`。
+
+        **步骤 5：判定**
+
+        - 所有命令 exit == 0 且验证命中 → 该命令通过
+        - 任意命令 exit ≠ 0 或验证未命中 → 该命令失败
+        - 任一失败 → `task_e2e_status = "FAIL"`，fail_reason = "task-specific e2e failed: <command>"
+
+        ### Step 6.1.7: 五阶段总判定
+
+        - **全部五阶段成功**（build + tests + cli_smoke + trace_check + task_e2e） → `cli_e2e_status = "PASS"`
+        - **任一阶段失败** → `cli_e2e_status = "FAIL"`
+        - fail_reason 优先级：task_e2e > trace_check > cli_smoke > test > build
+
+        ### Step 6.2: 输出
+
+        输出以下 JSON（系统会自动提取，**这是触发 loop 机制的关键**）：
+
+        ```json
+
+        {
+          "cli_e2e_status": "PASS" | "FAIL",
+          "build_ok": <boolean>,
+          "build_exit_code": <integer>,
+          "test_ok": <boolean>,
+          "test_exit_code": <integer>,
+          "test_count_passed": <integer>,
+          "test_count_failed": <integer>,
+          "cli_smoke_ok": <boolean>,
+          "cli_smoke_exit_code": <integer>,
+          "fail_reason": "<build failed | test failed | cli smoke failed | trace check failed | 空字符串>",
+          "build_log_tail": "<last 10 lines of build log>",
+          "test_log_tail": "<last 20 lines of test log>",
+          "cli_log_tail": "<last 10 lines of cli smoke log>",
+          "trace_check_status": "PASS" | "FAIL",
+          "trace_check_failures": [
+            {
+              "expected_function": "ClassName.methodName",
+              "expected_span_name": "domain.action",
+              "actual_span_name": "domain.other_action",
+              "issue": "span name mismatch",
+              "details": "found span but name does not match expected"
+            }
+          ],
+          "task_e2e_status": "PASS" | "FAIL",
+          "task_e2e_commands_executed": [
+            {
+              "command": "bun packages/cli/dist/bin/roy-bot.js <command> [args]",
+              "scenario": "<场景描述>",
+              "validation_method": "log | debug_trace | debug_span | combined",
+              "expected_signal": "<log 模式 grep 关键字>",
+              "exit_code": 0,
+              "log_tail": "<last 10 lines of log>",
+              "validation_passed": true,
+              "validation_details": "<grep 命中 / debug trace 走通 / combined 验证摘要>"
+            }
+          ],
+          "task_e2e_discovered_count": 0
+        }
+
+        ```
+
+        - `cli_e2e_status` 决定下游分支："PASS" → 进入 final-verify；"FAIL" → 回环到 tdd-implement 重做
+
+
+        ### Step 6.3: 记录
+
+        - task_operation_create(
+            action_type="milestone",
+            action_title="CLI E2E: <status>",
+            action_description=<完整 JSON + 三个阶段日志摘要>
+          )
+        - 追加 task_operation_create(
+            action_type="review",
+            action_title="CLI E2E trace check: <trace_check_status>",
+            action_description=<trace_check_failures 完整 JSON 数组（PASS 时为空数组）>
+          )
+        - task_update(progress=85)
+    depends_on:
+      - code-review
+  - id: final-verify
+    type: agent
+    name: "Phase 7: 最终验证 (8 项 checklist + verification-before-completion)"
+    config:
+      agent_type: roy
+      output:
+        mode: json
+        schema:
+          type: object
+          description: Final verify 结果 — verify_status 决定下游分支（PASS→merge-to-main / FAIL→tdd-implement 修复）；9 项 checklist 含 trace_re_verified
+          properties:
+            verify_status:
+              type: string
+              description: '"PASS" 表示 9 项 checklist 全部通过；"FAIL" 表示任一失败，触发回环到 tdd-implement'
+            checklist:
+              type: object
+              description: 9 项 checklist 逐项布尔结果（新增 trace_re_verified）
+              properties:
+                goals_verified:
+                  type: boolean
+                plan_doc_verified:
+                  type: boolean
+                evidence_collected:
+                  type: boolean
+                no_obvious_issues:
+                  type: boolean
+                review_passed:
+                  type: boolean
+                build_passes:
+                  type: boolean
+                tests_pass:
+                  type: boolean
+                cli_smoke_passes:
+                  type: boolean
+                task_specific_e2e_passes:
+                  type: boolean
+                  description: v1.2.0 新增 — task_e2e_commands 全部 exit 0 且验证命中（防 e2e → merge 之间破坏）
+                trace_re_verified:
+                  type: boolean
+                  description: 再校验一次 spans.db 中抽查 expected_traces 仍能查到（防止 e2e → merge 之间 trace 被破坏）
+            failed_items:
+              type: array
+              items:
+                type: string
+            evidence:
+              type: object
+              properties:
+                build_exit_code:
+                  type: integer
+                test_exit_code:
+                  type: integer
+                cli_smoke_exit_code:
+                  type: integer
+                task_e2e_re_verified_count:
+                  type: integer
+                  description: v1.2.0 新增 — 复跑 task_e2e_commands 的执行总数
+                task_e2e_re_verified_failed:
+                  type: array
+                  description: v1.2.0 新增 — 复跑失败的命令清单（命令 + 失败原因）
+                  items:
+                    type: string
+                trace_re_verified_spans:
+                  type: array
+                  description: 抽查命中的 span_name 列表（用于 evidence）
+                  items:
+                    type: string
+                spans_db_path:
+                  type: string
+          required:
+            - verify_status
+            - checklist
+            - failed_items
+          baseline_meta:
+            type: object
+            description: v1.4.0 + v1.5.0 — baseline/modified 元数据（v1.5.0 复用 capture-baseline 节点产物）
+            properties:
+              baseline_path:
+                type: string
+                description: baseline 文件路径（v1.5.0：从中央 manifest 读出）
+              modified_path:
+                type: string
+              invocation_hash:
+                type: string
+              baseline_source:
+                type: string
+                description: '"central-manifest"（v1.5.0 新增 — 由 capture-baseline 节点提供）'
+            new_regressions:
+              type: object
+              description: v1.4.0 + v1.5.0 — baseline 外新增稳定 failure/warning ID
+      prompt: >
+        ## Phase 7: 最终验证
+
+
+        工作目录: {{input.project_path}}/.worktrees/{{input.branch_name}}
+
+        任务 ID: {{nodes.init-task.task_id}}
+
+
+        ### ⚠️ Bun 跑 CLI 铁律（v1.2.0 新增 — 必修）
+
+        `packages/cli/dist/bin/roy-bot.js` 是 bun runtime 编译产物，**必须用 bun 跑**，
+        禁止 bash 直接调或 `node` 命令调用，否则崩 `TypeError: __require is not a function`。
+        本节点所有 CLI 调用必须以 `bun packages/cli/dist/bin/roy-bot.js <args>` 开头。
+
+        ### Step 7.0: 加载 skills（强制）
+
+        - skill("verification-before-completion") — 完成前必须独立运行所有验收命令
+
+
+        ### Step 7.1: 读取所有 task operations
+
+        - task_operation_list(task_id=<task_id>, limit=50)
+
+        - 检查每个验收标准都有对应 progress/milestone/review 记录
+
+
+        ### Step 7.2: 9 项 checklist（必须逐项核查）
+
+        - [ ] **goals-verified** — 任务 goals 全部满足（对照 init-task description）
+
+        - [ ] **plan-doc-verified** — plan 文档每个文件清单都已实现
+
+        - [ ] **evidence-collected** — 有 build/test/review 实际输出作为证据
+
+        - [ ] **no-obvious-issues** — 无 missing imports / 语法错误 / type error
+
+        - [ ] **review-passed** — code-review 节点输出 review_status === "PASS" 且
+        blocking 数组为空
+
+        - [ ] **build-passes** — {{input.build_command}} exit 0
+
+        - [ ] **tests-pass** — {{input.test_command}} 全部通过（pre-existing failures
+        已在 tdd-implement 节点文档化）
+
+        - [ ] **cli-smoke-passes** — CLI 命令可执行且输出预期
+
+        - [ ] **task-specific-e2e-passes**（v1.2.0 新增 — 任务相关真实 E2E） — 独立复跑 task_e2e_commands：
+          ```bash
+          # 对每条 task_e2e_command，重新执行一次（防止 e2e → merge 之间被破坏）
+          cd {{input.project_path}}/.worktrees/{{input.branch_name}}
+          bun <task_e2e_command>
+          ```
+          全部 exit 0 且验证命中 → task_specific_e2e_passes = true。
+          空数组 → 跳过本项（true）。
+
+        - [ ] **trace-re-verified**（核心新增 — 轻量复验）— 抽查 1-2 个 expected_traces 仍能在 spans.db 中查到（防止 e2e → merge 之间 trace 被破坏）：
+          ```bash
+          SPANS_DB=$(find ~/.config/roy-bot -name "spans.db" 2>/dev/null | head -1)
+          bun packages/cli/dist/bin/roy-bot.js debug trace <最近 trace_id> --db "$SPANS_DB" \
+            | grep -E "(domain.action1|domain.action2)"
+          ```
+          抽查命中 → trace_re_verified = true；否则 false。expected_traces 为空数组时跳过本项（true）。
+
+
+        ### ⚡ Bun test 提示（统一使用 --parallel=4）
+
+        本项目 `bun test` **统一使用 `--parallel=4` 模式**：
+
+        ```bash
+        bun test <package_path> --parallel=4
+        # 例：bun test packages/core --parallel=4
+        # 例：bun test packages/cli --parallel=4
+        # 例：bun test tests/cli --parallel=4
+        ```
+
+        **📌 关键约束：必须先跑 baseline，再跑修改后**
+
+        1. **跑 baseline（main 分支基线）**：
+           - checkout 到 main 或 `git stash` 暂存所有修改
+           - 跑 `bun test <package_path> --parallel=4`
+           - 记录 baseline 失败列表（fail_test_names）和通过数
+
+        2. **跑修改后测试**：
+           - 恢复你的修改（或重新跑）
+           - 跑 `bun test <package_path> --parallel=4`
+           - 记录修改后失败列表和通过数
+
+        3. **对比判定**：
+           - ✅ PASS：修改后失败列表 == baseline 失败列表（甚至更少）
+           - ❌ FAIL：修改后引入了 baseline 没有的新失败
+
+        **重要原则**：
+        - 只看"是否引入新错误"，不要被 baseline 已有的失败误导
+        - baseline 已存在的失败是已知的，不算 regression
+        - 如果不确定，先跑一次 baseline 确认 pre-existing 失败列表
+
+        ### Step 7.3: 独立验证（不信任 tdd-implement 报告）
+
+        - 在 worktree 内重新跑一次 {{input.test_command}}，确认本节点独立验证通过
+
+        - 跑一次 {{input.build_command}}，确认产物可用
+
+        - 跑一次 {{input.cli_smoke_command}}，确认 CLI 可启动
+
+        - **v1.2.0 新增**：跑完 task_e2e_commands 复跑（与 cli-e2e-test 节点 Step 6.1.6 独立），
+          取 task_e2e_commands 清单（来自 input 或 plan milestone），在 worktree 内用 bun 跑每条命令。
+          全部 exit 0 → `evidence.task_e2e_re_verified_count = <count>`, `evidence.task_e2e_re_verified_failed = []`。
+          任一失败 → 加入 `task_e2e_re_verified_failed` 数组（命令 + 失败原因）。
+
+
+
+        ### Step 7.3.6: 独立 baseline/modified 重检（v1.4.0 + v1.5.0 核心 — 读中央 manifest）
+
+        仅当 `{{input.baseline_regression_enabled}}` == "true" 时执行。
+        baseline 已由 capture-baseline 节点集中捕获（4 stage），本节点只 capture modified。
+
+        **步骤 1 — 读中央 manifest（verify stage）**：
+        ```bash
+        TASK_ID="{{nodes.init-task.task_id}}"
+        if [ ! -f "/tmp/$TASK_ID-central-baseline.json" ]; then
+          echo "ERROR: central baseline manifest not found (capture-baseline 节点 失败?)"
+          exit 1
+        fi
+        BASELINE_FILE=$(jq -r .baseline_files.verify /tmp/$TASK_ID-central-baseline.json)
+        ```
+
+        **步骤 2 — Capture modified（独立重检；不信 tdd-implement 报告）**：
+        ```bash
+        mkdir -p reports/
+        python3 scripts/capture_roy_rd_baseline.py \
+          --stage verify \
+          --category test,lint,typecheck,build,cli-smoke \
+          --task-id "$TASK_ID" \
+          --out reports/$TASK_ID-verify-modified-failures.json
+        ```
+
+        **步骤 3 — Verify set-diff**：
+        ```bash
+        python3 scripts/verify_roy_rd_baseline.py \
+          --baseline "$BASELINE_FILE" \
+          --modified reports/$TASK_ID-verify-modified-failures.json
+        ```
+        new_regressions[category] = sorted(modified) - sorted(baseline)，五 category 各自算。
+        任一非空 → tests_pass / build_passes / cli_smoke_passes 标记为 false，append 到 failed_items。
+
+        **步骤 4 — Fail-Closed Rules**：
+        - central manifest 缺失 / baseline 文件损坏 / parse fail → verify_status="FAIL"
+        - invocation_hash 不一致 → verify_status="FAIL"
+        - modified 缺失 baseline 存在的 category key → verify_status="FAIL"
+        - capture exit 非零但 modified.failures 为空 → verify_status="FAIL"
+        - 跨 worktree 切换 / capture timeout → verify_status="FAIL"
+
+        **绝对零失败不是 PASS 条件**；pre-existing failures 可保留。
+        invocation_hash 兼容性由 capture-baseline 节点保证。
+
+        ### Step 7.4: 判定
+
+        - 全部 10 项通过 → verify_status = "PASS"，进入 merge-to-main
+
+        - 任一失败 → verify_status = "FAIL"，触发 loop back 到 tdd-implement 节点
+
+        - 同时记录失败原因到 task_operation（action_type=problem）
+
+
+        ### Step 7.5: 记录
+
+        - task_operation_create(
+            action_type="review",
+            action_title="Final verify: <status>",
+            action_description=<8 项 checklist JSON + 失败原因（如果有）>
+          )
+        - task_update(progress=85)
+
+
+        ### Step 7.6: 输出
+
+        输出以下 JSON（系统会自动提取，**这是触发 loop 机制的关键**）：
+
+        ```json
+
+        {
+          "verify_status": "PASS" | "FAIL",
+          "checklist": {
+            "goals_verified": true/false,
+            "plan_doc_verified": true/false,
+            "evidence_collected": true/false,
+            "no_obvious_issues": true/false,
+            "review_passed": true/false,
+            "build_passes": true/false,
+            "tests_pass": true/false,
+            "cli_smoke_passes": true/false,
+            "task_specific_e2e_passes": true/false,
+            "trace_re_verified": true/false
+          },
+          "failed_items": [<name of failed checklist item>],
+          "evidence": {
+            "build_exit_code": <n>,
+            "test_exit_code": <n>,
+            "cli_smoke_exit_code": <n>,
+            "task_e2e_re_verified_count": <n>,
+            "task_e2e_re_verified_failed": [<失败的命令 + 原因>],
+            "trace_re_verified_spans": [<抽查命中的 span_name>],
+            "spans_db_path": "<spans.db 绝对路径>"
+          }
+        }
+
+        ```
+
+        - `verify_status` 决定下游分支："PASS" → 进入 merge-to-main；"FAIL" → 回环到
+        tdd-implement 重做
+
+    depends_on:
+      - cli-e2e-test
+  - id: merge-to-main
+    type: agent
+    name: "Phase 8: Merge to local main (auto_merge 铁律 + 冲突预检 + 验证)"
+    config:
+      agent_type: roy
+      output:
+        mode: json
+        schema:
+          type: object
+          description: Merge 结果 — merge_status 决定 summary-report 内容（merge_status 取值 MERGED | MERGE_SKIPPED | MERGE_FAILED）
+          properties:
+            merge_status:
+              type: string
+              description: '"MERGED" 表示成功合并到 base_branch；"MERGE_SKIPPED" 表示 auto_merge=false
+                跳过；"MERGE_FAILED" 表示执行失败（冲突/构建失败/用户撤销）'
+            merge_reason:
+              type: string
+              description: merge 状态原因（SKIPPED 时是授权提示，FAILED 时是失败原因）
+            merge_commit:
+              type: string
+              description: merge commit hash（仅 MERGED 时有值）
+            base_branch:
+              type: string
+            feature_branch:
+              type: string
+            post_merge_build_ok:
+              type: boolean
+              description: MERGED 时 post-merge build 是否成功
+            post_merge_test_ok:
+              type: boolean
+              description: MERGED 时 post-merge tests 是否成功
+            worktree_path:
+              type: string
+              description: 保留的 worktree 路径（用户最终验收后可清理）
+          required:
+            - merge_status
+            - merge_reason
+            - base_branch
+            - feature_branch
+      prompt: >
+        ## Phase 8: Merge to local main（auto_merge 铁律 + 冲突预检 + 验证）
+
+
+        工作目录: {{input.project_path}}（主 worktree，**不是** feature worktree）
+
+        任务 ID: {{nodes.init-task.task_id}}
+
+        基础分支: {{input.base_branch}}
+
+        特性分支: {{input.task_type}}/{{input.branch_name}}
+
+        auto_merge: {{input.auto_merge}}
+
+        worktree 路径: {{input.project_path}}/.worktrees/{{input.branch_name}}
+
+
+        ### ⚠️ 铁律
+
+        1. **auto_merge 必须显式为 "true" 才执行** — 默认 "false" → MERGE_SKIPPED
+        2. **必须在主 worktree 内执行**，不能在 feature worktree 内执行
+        3. **冲突时自动 rebase 到最新 base_branch**（保留 main 已有逻辑优先）
+        4. **merge 后必须跑 build + tests 验证 main 未被破坏**，否则回滚
+        5. **worktree 保留**（不清理），等用户最终验收
+
+
+        ### Step 8.1: 判断是否执行 merge
+
+        - 调用 bash 工具检查 `{{input.auto_merge}}`：
+          - **不等于 "true"** → merge_status = "MERGE_SKIPPED"，
+            merge_reason = "auto_merge='{{input.auto_merge}}' (需要用户显式授权为 'true')"
+            → 跳到 Step 8.6 直接输出
+          - **等于 "true"** → 继续执行以下步骤
+
+
+        ### Step 8.2: 工作目录校验
+
+        - 用 bash 工具运行 `git rev-parse --show-toplevel`，确认不在 feature worktree 内
+
+        - 如果在 feature worktree 内 → merge_status = "MERGE_FAILED"，merge_reason = "WORKTREE_ERROR"
+          → 跳到 Step 8.6
+
+
+        ### Step 8.3: Checkout base_branch + 拉取最新
+
+        - `git checkout {{input.base_branch}}`
+
+        - `git pull --ff-only`（如果离线则跳过）
+
+
+        ### Step 8.4: 冲突预检（git merge-tree）
+
+        - `MERGE_BASE=$(git merge-base {{input.base_branch}} {{input.task_type}}/{{input.branch_name}})`
+
+        - `git merge-tree $MERGE_BASE {{input.base_branch}} {{input.task_type}}/{{input.branch_name}} | grep "<<<<<<<"`
+          判断是否有冲突
+
+        - **有冲突** → 自动 rebase：
+          1. `git checkout {{input.task_type}}/{{input.branch_name}}`
+          2. `git rebase {{input.base_branch}}`
+          3. rebase 失败 → `git rebase --abort` + merge_status = "MERGE_FAILED"，merge_reason = "REBASE_FAILED"
+          4. rebase 成功 → `git checkout {{input.base_branch}}` 后继续
+
+        - **无冲突** → 直接进入 Step 8.5
+
+
+        ### Step 8.5: 执行 merge + post-merge 验证
+
+        - `git merge --no-ff {{input.task_type}}/{{input.branch_name}} -m "Merge {{input.task_type}}/{{input.branch_name}} into {{input.base_branch}}"`
+
+        - 跑 `{{input.build_command}}`，exit != 0 → merge_status = "MERGE_FAILED"，merge_reason = "POST_MERGE_BUILD_FAILED"
+
+        - 跑 `{{input.test_command}}`，exit != 0 → merge_status = "MERGE_FAILED"，merge_reason = "POST_MERGE_TEST_FAILED"
+
+        - 全部成功 → merge_status = "MERGED"，merge_commit = `git rev-parse HEAD`
+
+
+        ### Step 8.6: 输出
+
+        输出以下 JSON（系统会自动提取，**这是 summary-report 节点读取状态的关键**）：
+
+        ```json
+
+        {
+          "merge_status": "MERGED" | "MERGE_SKIPPED" | "MERGE_FAILED",
+          "merge_reason": "<reason>",
+          "merge_commit": "<commit hash | 空字符串>",
+          "base_branch": "{{input.base_branch}}",
+          "feature_branch": "{{input.task_type}}/{{input.branch_name}}",
+          "post_merge_build_ok": <boolean>,
+          "post_merge_test_ok": <boolean>,
+          "worktree_path": "{{input.project_path}}/.worktrees/{{input.branch_name}}"
+        }
+
+        ```
+
+
+
+        ### Step 8.7: 记录
+
+        - task_operation_create(
+            action_type="milestone",
+            action_title="Merge: <merge_status>",
+            action_description=<完整 JSON + merge_commit / fail 原因>
+          )
+        - task_update(progress=95)
+    depends_on:
+      - final-verify
+  - id: summary-report
+    type: agent
+    name: "Phase 9: 构建总结报告 + 任务闭环"
+    config:
+      agent_type: roy
+      output:
+        mode: json
+        schema:
+          type: object
+          description: 总结报告结果 — workflow 终态
+          properties:
+            summary_report_path:
+              type: string
+            task_completed:
+              type: boolean
+            task_progress:
+              type: integer
+            merge_status:
+              type: string
+              description: '"MERGED" / "READY_FOR_MERGE" / "FAILED" — 给外部系统读'
+            next_step:
+              type: string
+          required:
+            - summary_report_path
+            - task_completed
+            - merge_status
+            - next_step
+      prompt: >
+        ## Phase 9: 构建总结报告 + 任务闭环
+
+
+        任务 ID: {{nodes.init-task.task_id}}
+
+        报告输出: {{input.report_dir}}{{nodes.init-task.task_id}}-rd-summary.md
+
+
+        ### Step 9.1: 收集所有阶段产物
+
+        - 读取 task_operation_list(task_id=<task_id>, limit=50) 获取完整执行轨迹
+
+        - 读取 plan 节点产出的 plan_doc 路径
+
+        - 读取 tdd-implement 节点的 files_modified / commits / test_count
+
+        - 读取 code-review 节点的 review JSON（severity 分布）
+
+        - 读取 final-verify 节点的 checklist 结果
+
+        - 读取 merge-to-main 节点的 stdout（MERGE_OK 或 MERGE_SKIPPED）
+
+
+        ### Step 9.2: 生成 markdown 报告
+
+
+        在 worktree 内执行 `mkdir -p {{input.report_dir}}`，然后写入
+        `{{nodes.init-task.task_id}}-rd-summary.md`。
+
+
+        报告必须包含以下小节（agent 根据阶段产物填充实际内容）：
+
+
+        - `## 任务概览`：标题 / 类型 / 优先级 / 分支 / 基础分支 / Worktree / 任务链接
+
+        - `## 执行轨迹（9 个阶段）`：每个阶段一段，包含该阶段的 op 记录与状态
+            - Phase 1: 任务管理（相似任务参考、Tags）
+            - Phase 2: Worktree 隔离（路径 / 分支 / 状态）
+            - Phase 3: Plan（设计文档路径 / 预计涉及文件 / 预计测试数）
+            - Phase 4: TDD 循环（RED/GREEN/REFACTOR / 测试结果 / Commits）
+            - Phase 5: Code Review（status / severity 分布 / 建议）
+            - Phase 6: CLI E2E（Build / Tests / CLI Smoke 三个 PASS/FAIL）
+            - Phase 7: 最终验证（status / 8 项 checklist 逐项打勾或叉）
+            - Phase 8: Merge 状态 — 根据 auto_merge 实际值选择：
+                - 如果 auto_merge 是 "true" 且 merge-to-main 节点输出包含 "MERGE_OK"：
+                  写 "已合并到 {{input.base_branch}} (commit: <hash>)" 并附带 post-merge build/tests 结果
+                - 否则：写 "未合并（auto_merge={{input.auto_merge}}，需用户授权），分支已就绪: {{input.task_type}}/{{input.branch_name}}"
+            - Phase 9: 总结报告（报告路径 / 任务状态）
+        - `## 改动文件清单`：执行 `git diff {{input.base_branch}}...HEAD --stat` 抓取输出嵌入
+
+        - `## 关键代码片段`：1-2 个最重要的改动（附 commit hash）
+
+        - `## 遗留事项 / 风险`：未解决的问题 / 已知限制 / pre-existing failures 列表
+
+        - `## 下一步建议`：例如用户审查 worktree 后可合并到 main / 建议拆分多个 PR / 建议补充集成测试
+
+
+        报告必须以一级标题 `# R&D Task #<task_id> Summary Report` 开头，并标注 "Generated by
+        roy-rd-pipeline v1.2"。
+
+
+        ### Step 9.3: 任务闭环
+
+        - task_operation_create(
+            action_type="completed",
+            action_title="R&D pipeline complete",
+            action_description="Summary report: <report_path>"
+          )
+        - task_update(progress=100)
+
+        - task_complete()
+
+
+        ### Step 9.4: 飞书通知（可选，如果用户在飞书可达）
+
+        如果用户提供了 lark 上下文，可调用 lark-cli 发送总结消息到用户对话
+
+        （参考 Task #1993 的做法 — 完整根因报告 + 分支就绪提示）
+
+
+        ### Step 9.5: 输出
+
+        输出以下 JSON（系统会自动提取）：
+
+        ```json
+
+        {
+          "summary_report_path": "{{input.report_dir}}{{nodes.init-task.task_id}}-rd-summary.md",
+          "task_completed": true,
+          "task_progress": 100,
+          "merge_status": "MERGED" | "READY_FOR_MERGE" | "FAILED",
+          "next_step": "<用户下一步操作建议>"
+        }
+
+        ```
+
+    depends_on:
+      - merge-to-main
+entry: init-task
+outputs: []
+inputs:
+  task_type:
+    type: string
+    description: 任务类型 — feature | bug | refactor
+    required: true
+  task_title:
+    type: string
+    description: 任务标题（将作为 task_create 的 title）
+    required: true
+  task_description:
+    type: string
+    description: 任务详细描述（背景、验收标准、复现步骤等）
+    required: true
+  task_priority:
+    type: string
+    description: 任务优先级 — low | medium | high
+    default: medium
+    required: false
+  task_tags:
+    type: string
+    description: 额外标签（逗号分隔），会与 task_type、rd-pipeline 合并
+    default: ""
+    required: false
+  project_path:
+    type: string
+    description: 项目根路径
+    default: ~/work/codework/personal/roy_world/roy-bot
+    required: false
+  base_branch:
+    type: string
+    description: 基础分支（worktree 将基于此创建新分支）
+    default: main
+    required: false
+  branch_name:
+    type: string
+    description: 分支名（不含 type 前缀，如 plugin-emit-notification）
+    required: true
+  test_command:
+    type: string
+    description: 单元测试命令
+    default: cd packages/core && bun test && cd ../cli && bun test
+    required: false
+  build_command:
+    type: string
+    description: 构建命令
+    default: bun run build:cli:dev:single
+    required: false
+  cli_smoke_command:
+    type: string
+    description: CLI smoke 测试命令
+    default: bun packages/cli/dist/bin/roy-bot.js --help
+    required: false
+  task_e2e_commands:
+    type: array
+    description: |
+      任务相关的真实 CLI E2E 命令清单（每条是完整命令字符串，bun 前缀开头）。
+      调用方显式传入则直接使用；否则 cli-e2e-test 从 plan milestone 读 task_e2e_commands。
+      纯文档/chore/非 CLI 改动任务留空即可（cli-e2e-test 会自动跳过 Step 6.1.6）。
+    default: []
+    items:
+      type: string
+    required: false
+  auto_merge:
+    type: string
+    description: |
+      ⚠️ 铁律：仅当用户显式授权为 "true" 时才合并到 main。
+      默认 "false" — 跳过 merge，输出 MERGE_SKIPPED 等待用户授权。
+    default: "false"
+    required: false
+  report_dir:
+    type: string
+    description: 总结报告输出目录（相对 project_path）
+    default: reports/
+    required: false
+metadata:
+  tags: []
+edges:
+  - from: init-task
+    to: setup-worktree
+  - from: setup-worktree
+    to: capture-baseline
+  - from: capture-baseline
+    to: plan
+  - from: plan
+    to: tdd-implement
+  - from: merge-to-main
+    to: summary-report
+  - from: tdd-implement
+    to: code-review
+    when: "{{nodes.tdd-implement.tdd_status}} == 'PASS'"
+  - from: code-review
+    to: cli-e2e-test
+    when: "{{nodes.code-review.review_status}} == 'PASS'"
+  - from: cli-e2e-test
+    to: final-verify
+    when: "{{nodes.cli-e2e-test.cli_e2e_status}} == 'PASS'"
+  - from: final-verify
+    to: merge-to-main
+    when: "{{nodes.final-verify.verify_status}} == 'PASS'"
+  - from: tdd-implement
+    to: tdd-implement
+    when: "{{nodes.tdd-implement.tdd_status}} == 'FAIL'"
+  - from: code-review
+    to: tdd-implement
+    when: "{{nodes.code-review.review_status}} == 'NEEDS_FIX'"
+  - from: cli-e2e-test
+    to: tdd-implement
+    when: "{{nodes.cli-e2e-test.cli_e2e_status}} == 'FAIL'"
+  - from: final-verify
+    to: tdd-implement
+    when: "{{nodes.final-verify.verify_status}} == 'FAIL'"
+

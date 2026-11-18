@@ -1,0 +1,129 @@
+# Tool-Skill-Agent Chain
+#
+# A realistic AI pipeline demonstrating:
+# - Tool (data fetch)
+# - Agent (reasoning)
+# - Skill (processing)
+# - Another Agent (deep reasoning)
+# - Skill (enhancement)
+# - Tool (final validation)
+#
+# Diagram:
+#
+# fetch-raw-data (tool)
+#        │
+#        ↓
+# understand-context (agent)
+#        │
+#        ↓
+# process-with-skill (skill)
+#        │
+#        ↓
+# deep-reasoning (agent)
+#        │
+#        ↓
+# enhance-result (skill)
+#        │
+#        ↓
+# final-validate (tool)
+
+name: tool-skill-agent-chain
+version: "1.0"
+description: Chain of Tool, Agent, and Skill nodes for AI processing pipeline
+
+metadata:
+  author: Roy Agent
+  tags:
+    - chain
+    - tool
+    - agent
+    - skill
+    - ai-pipeline
+
+nodes:
+  # ========== Tool: Fetch raw data ==========
+  - id: fetch-raw-data
+    type: tool
+    name: Fetch Raw Data
+    config:
+      tool: echo
+      message: "Fetching data from source"
+    depends_on: []
+
+  # ========== Agent: Initial understanding ==========
+  - id: understand-context
+    type: agent
+    name: Context Understanding Agent
+    config:
+      agent_type: general
+      prompt: "Understand the context of: {{fetch-raw-data.output}}. Provide a summary of the key information."
+    depends_on:
+      - fetch-raw-data
+
+  # ========== Skill: Process with skill ==========
+  - id: process-with-skill
+    type: skill
+    name: Processing Skill
+    config:
+      skill: text-processor
+      input:
+        text: "{{understand-context.output}}"
+        options:
+          lowercase: true
+          trim: true
+    depends_on:
+      - understand-context
+
+  # ========== Agent: Deep reasoning ==========
+  - id: deep-reasoning
+    type: agent
+    name: Deep Reasoning Agent
+    config:
+      agent_type: general
+      prompt: "Perform deep reasoning on the processed data: {{process-with-skill.output}}. Identify patterns and insights."
+    depends_on:
+      - process-with-skill
+
+  # ========== Skill: Enhancement ==========
+  - id: enhance-result
+    type: skill
+    name: Enhancement Skill
+    config:
+      skill: enhancer
+      input:
+        data: "{{deep-reasoning.output}}"
+        options:
+          addMetadata: true
+    depends_on:
+      - deep-reasoning
+
+  # ========== Tool: Final validation ==========
+  - id: final-validate
+    type: tool
+    name: Final Validation
+    config:
+      tool: validator
+      source: final
+    depends_on:
+      - enhance-result
+
+outputs:
+  - name: initial_understanding
+    source: understand-context
+    path: output
+
+  - name: processed_data
+    source: process-with-skill
+    path: output
+
+  - name: reasoning_result
+    source: deep-reasoning
+    path: output
+
+  - name: enhanced_result
+    source: enhance-result
+    path: output
+
+  - name: final_validation
+    source: final-validate
+    path: valid

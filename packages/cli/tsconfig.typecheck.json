@@ -1,0 +1,55 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022"],
+    "outDir": "./dist",
+    "strict": true,
+    "noImplicitAny": false,
+    "noImplicitReturns": false,
+    "noFallthroughCasesInSwitch": false,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "resolveJsonModule": true,
+    "types": ["node", "bun-types"],
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+    "baseUrl": ".",
+    "paths": {
+      "@ai-setting/roy-bot-core": ["../core/src"],
+      "@ai-setting/roy-bot-core/*": ["../core/src/*"],
+      "@ai-setting/roy-bot-coder-harness": ["../coder-harness/src"],
+      "@ai-setting/roy-bot-coder-harness/*": ["../coder-harness/src/*"]
+    }
+  },
+  "include": [
+    "src/**/*.ts",
+    "../core/src/env/**/*.ts",
+    "../core/src/components/**/*.ts",
+    "../core/src/config/*.ts",
+    "../core/src/index.ts",
+    "../coder-harness/src/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "**/node_modules/**",
+    "../core/src/**/*.test.ts",
+    "../core/src/**/*.test.tsx",
+    "../core/src/**/*.spec.ts",
+    "../core/src/**/__tests__/**",
+    "../core/src/**/__integration__/**",
+    "../coder-harness/src/**/*.test.ts",
+    "../coder-harness/src/**/*.test.tsx",
+    "../coder-harness/src/**/*.spec.ts",
+    "../coder-harness/src/**/__tests__/**",
+    "src/**/*.test.ts",
+    "src/**/*.spec.ts"
+  ]
+}

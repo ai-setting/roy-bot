@@ -1,0 +1,58 @@
+name: v3-mini-demo
+version: "1.0"
+description: |
+  Minimal 2-node workflow to verify JSON output extraction (v3 plugin).
+  
+  Schema requires:
+    - char_count (integer)
+    - summary (string)
+  
+  FLOW: analyze -> output
+
+config:
+  parallel_limit: 1
+  timeout: 120000
+
+nodes:
+  - id: analyze
+    type: agent
+    name: Analyze Message
+    config:
+      agent_type: general
+      maxIterations: 3
+      output:
+        mode: json
+        schema:
+          type: object
+          properties:
+            char_count:
+              type: integer
+            summary:
+              type: string
+          required:
+            - char_count
+            - summary
+      options:
+        allowedTools:
+          - echo
+      prompt: |
+        Analyze the user's message "{{input.message}}" and produce a JSON object.
+        
+        Output EXACTLY this JSON object as plain text (no markdown, no code blocks):
+        
+        {
+          "char_count": <integer — count of characters in the input>,
+          "summary": "<one-sentence summary>"
+        }
+    depends_on: []
+
+  - id: output
+    type: tool
+    name: Output Result
+    config:
+      tool: echo
+      message: "v3-mini-demo: char_count = {{nodes.analyze.char_count}}, summary = {{nodes.analyze.summary}}"
+    depends_on:
+      - analyze
+
+entry: __default_entry__

@@ -1,0 +1,10 @@
+# greeting-workflow.yaml
+name: greeting-workflow
+nodes:
+  - id: greeting-agent
+    type: agent
+    config:
+      agent_type: general
+      prompt: |
+        你是一个友好的问候助手。
+        请先询问用户的名字，然后对他们进行友好的问候。

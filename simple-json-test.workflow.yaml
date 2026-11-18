@@ -1,0 +1,78 @@
+name: simple-json-test
+version: "1.3"
+description: |
+  Minimal workflow to verify JSON output. The schema requires two fields:
+    - char_count (integer): number of characters in the user's message
+    - summary (string): one-sentence summary of the user's message
+
+  Used as fixture for Task #1694 json-extract sub-agent verification —
+  the json-extract sub-agent must call workflow_submit_output with both
+  fields populated from a real agent text response.
+
+  INPUT:
+    "message": "string — what the user wants the agent to analyze (default: 'Hello, world!')"
+
+  FLOW:
+    start -> simple-agent -> end
+
+entry: start
+
+config:
+  parallel_limit: 1
+  timeout: 120000
+
+nodes:
+  - id: start
+    type: tool
+    name: Start
+    config:
+      tool: echo
+      message: "simple-json-test: analyzing message={{input.message}}"
+
+  - id: simple-agent
+    type: agent
+    name: "Simple JSON Agent"
+    config:
+      agent_type: general
+      maxIterations: 3
+      output:
+        mode: json
+        schema:
+          type: object
+          properties:
+            char_count:
+              type: integer
+            summary:
+              type: string
+          required:
+            - char_count
+            - summary
+      options:
+        allowedTools:
+          - echo
+      prompt: |
+        You are a simple text-analysis agent. Your task is to analyze the
+        user's input message and produce a structured JSON output.
+
+        ## Input
+        User message: "{{input.message}}"
+
+        ## Your task
+        1. Count the characters in the user's message
+        2. Write a one-sentence summary of the message
+
+        ## Output
+        Just output the JSON object (plain text or via your tools).
+        Do NOT worry about specific tool names — output the JSON, the system
+        will route it appropriately.
+    depends_on:
+      - start
+
+  - id: end
+    type: tool
+    name: End
+    config:
+      tool: echo
+      message: "simple-json-test: completed. char_count = {{nodes.simple-agent.char_count}}, summary = {{nodes.simple-agent.summary}}"
+    depends_on:
+      - simple-agent

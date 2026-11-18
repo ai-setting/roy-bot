@@ -1,0 +1,8 @@
+# 根 bunfig — Task #4278 片1：Solid 运行期支持（solid-js client runtime 重定向）。
+#
+# 默认注册的只有「solid-js server→client 重定向」（无害，实测 e2e #2297 仍 PASS）。
+# tsx 级 Solid 转译是 opt-in（ROY_SOLID_JSX=1），因为 `bun run` 下注册全局
+# tsx onLoad 会干扰 bun 内置 loader（实测把 e2e #2297 从 PASS 打成 FAIL）。
+# `roy-bot interactive` 走 `bun build` 产物，靠 per-file tsconfig
+# （packages/cli/src/tui-solid/tsconfig.json）保证 Solid JSX，无需 tsx preload。
+preload = ["./scripts/tui-solid/solid-jsx-preload.ts"]

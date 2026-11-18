@@ -1,0 +1,89 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.pnpm-store/
+.worktrees/
+logs/
+.roy/
+
+# Examples (integration tests) — keep YAML workflow templates trackable
+examples/*
+!examples/*.yaml
+!examples/*.yml
+worktrees/
+
+# reports
+reports/
+
+# secret
+*.npmrc
+
+# Build artifacts
+*.tgz
+
+# Feishu image files (downloaded via lark-cli)
+img_v3_*
+
+# TypeScript build artifacts (compiled from src/)
+**/src/**/*.js
+**/src/**/*.js.map
+**/src/**/*.d.ts
+**/src/**/*.d.ts.map
+
+# Unwanted files
+--help
+--help.dsc
+*.wav
+fonts.dir
+fonts.scale
+gz*
+orb.db/
+tmp/*.log
+tmp2
+invoke.log*
+*.log*
+.github/workflows/
+!.github/workflows/
+.memory-meta/
+.worktrees
+# Build artifacts - standalone binaries
+packages/roy-bot-standalone/bin/roy
+packages/roy-bot-standalone/bin/roy-*
+packages/roy-bot-standalone/bin/roy.exe
+-e 
+# Desktop build artifacts
+packages/desktop/release/
+packages/desktop/vendor/
+-e 
+# Root build artifact
+index.html
+-e 
+# Bun lock file (use pnpm instead)
+bun.lock
+vendor/
+-e 
+# Backup files
+*.bak*
+*.bak2
+*.backup
+*.tmp
+*.orig
+*.rej
+-e 
+# Runtime logs
+nohup.out
+
+# Python cache
+__pycache__/
+
+# TongAgents generated Application CLIs
+/.example/apps/
+
+# Python packaging leftovers (running pip/setuptools inside this repo)
+*.egg-info/
+
+# Publish / standalone temp dirs (hold 100MB+ binaries while npm publish runs).
+# MUST stay ignored: after an interrupted publish they may contain leftover binaries
+# that must survive `git clean -fd` so they can be moved back into bin/ manually.
+.publish-test/
+packages/roy-bot-standalone/.stale-binaries/

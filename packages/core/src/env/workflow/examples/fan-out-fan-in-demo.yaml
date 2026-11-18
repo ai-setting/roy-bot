@@ -1,0 +1,82 @@
+# Fan-out/Fan-in Demo Workflow (Task #2240)
+#
+# Tests the fix for the parallel-dependency bug:
+#   start → {A, B, C, D} parallel → downstream F
+# F declares depends_on=[A,B,C,D] and MUST wait for all of them
+# before executing.
+
+name: fan-out-fan-in-demo
+version: "1.0.0"
+description: |
+  Minimal fan-out/fan-in workflow used to verify the parallel-dependency
+  fix from Task #2240. Each parallel node (A/B/C/D) writes a marker to
+  /tmp/task-2240-NODES.log; downstream F reads the entire log and
+  confirms A/B/C/D markers are present before producing its own output.
+  This proves F only runs after all parallel siblings complete.
+
+config:
+  parallel_limit: 10  # Allow all 4 parallel + start to dispatch together
+
+entry: start
+
+nodes:
+  # Entry node — fans out to 4 parallel nodes
+  - id: start
+    type: tool
+    config:
+      tool: bash
+      input:
+        command: "echo START && date +%s%N > /tmp/task-2240-NODES.log && cat /tmp/task-2240-NODES.log"
+    depends_on: []
+
+  # 4 parallel nodes — must all complete before F runs
+  - id: A
+    type: tool
+    config:
+      tool: bash
+      input:
+        command: "sleep 0.1 && echo A_$(date +%s%N) >> /tmp/task-2240-NODES.log && echo A_DONE"
+    depends_on: ["start"]
+  - id: B
+    type: tool
+    config:
+      tool: bash
+      input:
+        command: "sleep 0.15 && echo B_$(date +%s%N) >> /tmp/task-2240-NODES.log && echo B_DONE"
+    depends_on: ["start"]
+  - id: C
+    type: tool
+    config:
+      tool: bash
+      input:
+        command: "sleep 0.05 && echo C_$(date +%s%N) >> /tmp/task-2240-NODES.log && echo C_DONE"
+    depends_on: ["start"]
+  - id: D
+    type: tool
+    config:
+      tool: bash
+      input:
+        command: "sleep 0.2 && echo D_$(date +%s%N) >> /tmp/task-2240-NODES.log && echo D_DONE"
+    depends_on: ["start"]
+
+  # Downstream F — must wait for A, B, C, D all to complete
+  - id: F
+    type: tool
+    config:
+      tool: bash
+      input:
+        command: "echo F_START_$(date +%s%N) >> /tmp/task-2240-NODES.log && cat /tmp/task-2240-NODES.log"
+    depends_on: ["A", "B", "C", "D"]
+
+# Explicit edges mirror the depends_on graph (mimics real-world workflows
+# that use both). Without the fix, A's completion triggers processEdgesAfterCompletion
+# which would push F to toStart before B/C/D complete.
+edges:
+  - { from: start, to: A }
+  - { from: start, to: B }
+  - { from: start, to: C }
+  - { from: start, to: D }
+  - { from: A, to: F }
+  - { from: B, to: F }
+  - { from: C, to: F }
+  - { from: D, to: F }

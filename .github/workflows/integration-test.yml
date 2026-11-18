@@ -1,0 +1,60 @@
+name: Integration Test
+
+on:
+  workflow_dispatch:
+    inputs:
+      core_version:
+        description: 'core version (e.g., 1.4.0, latest)'
+        required: false
+        default: 'latest'
+      coder_version:
+        description: 'coder-harness version (e.g., 1.1.0, latest)'
+        required: false
+        default: 'latest'
+      cli_version:
+        description: 'cli version (e.g., 1.4.0, latest)'
+        required: false
+        default: 'latest'
+
+env:
+  CORE_VERSION: ${{ inputs.core_version || 'latest' }}
+  CODER_VERSION: ${{ inputs.coder_version || 'latest' }}
+  CLI_VERSION: ${{ inputs.cli_version || 'latest' }}
+
+jobs:
+  integration-test:
+    name: Integration Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Create test directory
+        run: mkdir -p /tmp/roy-bot-integration-test
+
+      - name: Copy test files
+        run: cp scripts/integration-test/* /tmp/roy-bot-integration-test/
+
+      - name: Install packages
+        run: |
+          cd /tmp/roy-bot-integration-test
+          npm install @ai-setting/roy-bot-core@${CORE_VERSION} \
+                      @ai-setting/roy-bot-coder-harness@${CODER_VERSION} \
+                      @ai-setting/roy-bot-cli@${CLI_VERSION}
+
+      - name: Run integration tests
+        run: |
+          cd /tmp/roy-bot-integration-test
+          node test.mjs
+
+      - name: Report versions
+        run: |
+          echo "Installed versions:"
+          echo "  - @ai-setting/roy-bot-core: $(node -p "require('/tmp/roy-bot-integration-test/node_modules/@ai-setting/roy-bot-core/package.json').version")"
+          echo "  - @ai-setting/roy-bot-coder-harness: $(node -p "require('/tmp/roy-bot-integration-test/node_modules/@ai-setting/roy-bot-coder-harness/package.json').version")"
+          echo "  - @ai-setting/roy-bot-cli: $(node -p "require('/tmp/roy-bot-integration-test/node_modules/@ai-setting/roy-bot-cli/package.json').version")"

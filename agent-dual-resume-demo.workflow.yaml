@@ -1,0 +1,77 @@
+name: agent-dual-resume-demo
+version: "1.0"
+description: |
+  Dual agent node serial pause/resume demo.
+  Flow: start -> agent-confirm-a (ask_user) -> agent-confirm-b (ask_user) -> finish
+
+  Fresh run:
+    bun run packages/cli/dist/bin/roy-bot.js workflow run agent-dual-resume-demo.workflow.yaml --file --debug --input '{"userName":"demo-user"}'
+  Resume agent-A:
+    bun run packages/cli/dist/bin/roy-bot.js workflow run agent-dual-resume-demo --session-id <runId> --input "Yes"
+  Resume agent-B:
+    bun run packages/cli/dist/bin/roy-bot.js workflow run agent-dual-resume-demo --session-id <runId> --input "Approve"
+
+entry: start
+
+config:
+  parallel_limit: 1
+  timeout: 180000
+
+nodes:
+  - id: start
+    type: tool
+    name: Start
+    config:
+      tool: echo
+      message: "agent-dual-resume-demo: started for user={{input.userName}}"
+
+  - id: agent-confirm-a
+    type: agent
+    name: Agent Confirm A
+    config:
+      agent_type: general
+      options:
+        maxIterations: 5
+      prompt: |
+        You are workflow step A (agent-confirm-a). Do not use any tools except ask_user.
+
+        Step 1 (required on first turn): Call ask_user exactly once with:
+          query: "[Step A] Proceed with phase 1 for user {{input.userName}}?"
+          options: ["Yes", "No"]
+
+        Step 2 (after user responds): Reply with exactly one line:
+          PHASE_A: <the user's answer>
+
+        Do not skip Step 1. Do not call bash or other tools.
+    depends_on:
+      - start
+
+  - id: agent-confirm-b
+    type: agent
+    name: Agent Confirm B
+    config:
+      agent_type: general
+      options:
+        maxIterations: 5
+      prompt: |
+        You are workflow step B (agent-confirm-b). Do not use any tools except ask_user.
+
+        Step 1 (required on first turn): Call ask_user exactly once with:
+          query: "[Step B] Proceed with phase 2 for user {{input.userName}}?"
+          options: ["Approve", "Reject"]
+
+        Step 2 (after user responds): Reply with exactly one line:
+          PHASE_B: <the user's answer>
+
+        Do not skip Step 1. Do not call bash or other tools.
+    depends_on:
+      - agent-confirm-a
+
+  - id: finish
+    type: tool
+    name: Finish
+    config:
+      tool: echo
+      message: "agent-dual-resume-demo: finished after both agent confirmations"
+    depends_on:
+      - agent-confirm-b

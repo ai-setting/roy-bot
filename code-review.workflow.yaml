@@ -1,0 +1,407 @@
+name: code-review
+version: "1.1"
+description: |
+  Generic code-review workflow with impact-aware testing.
+
+  FLOW:
+    pre-check → review → impact-analyze → verify-tests → e2e-verify → output
+                          ↑                        ↑              ↑
+                     "改了哪些文件/模块"      只跑相关测试     只跑相关 smoke
+
+  3 review levels:
+    easy   — review only (verify-tests + e2e auto-skip)
+    middle — review + impact-aware test regression
+    hard   — review + 3-dimension analysis + impact-aware tests + build + E2E
+
+  INPUT:
+    repo_path    — path to git repo
+    base_ref     — review range <base_ref>..HEAD
+    commits      — explicit commit refs (overrides base_ref)
+    review_level — "easy" | "middle" | "hard" (default: "easy")
+
+config:
+  parallel_limit: 1
+  timeout: 1200000
+
+nodes:
+  # ===========================================================
+  # PRE-CHECK
+  # ===========================================================
+  - id: pre-check
+    type: tool
+    name: Resolve Commits
+    config:
+      tool: bash
+      command: |
+        set -euo pipefail
+        REPO_PATH="{{input.repo_path}}"
+        [ -z "$REPO_PATH" ] && REPO_PATH="$(pwd)"
+        cd "$REPO_PATH"
+
+        if [ -n "{{input.commits}}" ]; then
+          COMMITS="{{input.commits}}"
+        elif [ -n "{{input.base_ref}}" ]; then
+          COMMITS=$(git log --reverse --format="%H" "{{input.base_ref}}..HEAD" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')
+        else
+          COMMITS=$(git log --reverse --format="%H" HEAD~3..HEAD 2>/dev/null | tr '\n' ' ' | sed 's/ $//')
+        fi
+
+        echo "repo_path=$REPO_PATH"
+        echo "review_level={{input.review_level}}"
+        echo "commit_count=$(echo "$COMMITS" | wc -w)"
+
+        echo "--- commits ---"
+        echo "$COMMITS" | xargs -n1 git log -1 --format="%h %an %ad %s" --date=short 2>/dev/null || echo "(none)"
+
+        echo "--- changed files (consolidated) ---"
+        echo "$COMMITS" | xargs -n1 git diff-tree --no-commit-id --name-only -r 2>/dev/null | sort -u
+
+        echo "--- diff stats (first 500 lines) ---"
+        echo "$COMMITS" | xargs -n1 git show --stat --format="=== %h %s ===" 2>/dev/null | head -500
+
+        echo "RESOLVED_COMMITS=$COMMITS"
+    depends_on: []
+
+  # ===========================================================
+  # REVIEW — code review per level
+  # ===========================================================
+  - id: review
+    type: agent
+    name: Code Reviewer
+    config:
+      agent_type: general
+      maxIterations: 20
+      options:
+        allowedTools:
+          - bash
+          - read_file
+          - grep
+          - echo
+      output:
+        mode: json
+        schema:
+          type: object
+          properties:
+            overall_score:
+              type: integer
+            verdict:
+              type: string
+              description: "approve | request_changes | comment"
+            top_issues:
+              type: string
+              description: "3 comma-separated issue titles"
+            summary:
+              type: string
+            changed_modules:
+              type: string
+              description: "comma-separated module names or top-level dirs affected by this change"
+            changed_files:
+              type: string
+              description: "comma-separated relative file paths"
+          required:
+            - overall_score
+            - verdict
+            - top_issues
+            - summary
+            - changed_modules
+            - changed_files
+      prompt: |
+        Review code changes. Level: **{{input.review_level}}**
+
+        Repo: {{input.repo_path}}   Commits: {{input.commits}}
+
+        ## Step 1 — Discover project type
+        Read package.json / pyproject.toml / Cargo.toml / go.mod / Makefile
+        to understand language, test framework, build system.
+
+        ## Step 2 — Review
+        ### EASY
+        - Read actual diffs (git show <commit>)
+        - Check: logic bugs, security, performance, error handling
+        - Output: overall_score (0-100), verdict, top_issues, summary,
+          changed_modules (list affected directories/modules),
+          changed_files (list affected file paths)
+
+        ### MIDDLE
+        Everything in EASY + inspect affected test files (don't run yet).
+        Include test file paths in changed_files.
+
+        ### HARD
+        Everything in MIDDLE + understand architecture first (read key source files),
+        then 3-dimension review (quality/tests/architecture).
+
+        ## OUTPUT (CRITICAL)
+        In your FINAL message, output ONLY a plain JSON object:
+        {"overall_score":N, "verdict":"...", "top_issues":"...",
+         "summary":"...", "changed_modules":"dir1,dir2",
+         "changed_files":"path/to/file1.ts,path/to/file2.ts"}
+
+        Spend ~30% iterations exploring, then STOP and output JSON.
+
+    depends_on:
+      - pre-check
+
+  # ===========================================================
+  # IMPACT ANALYZE — figure out what tests need to run
+  # ===========================================================
+  - id: impact-analyze
+    type: agent
+    name: Impact Analyzer
+    config:
+      agent_type: general
+      maxIterations: 6
+      options:
+        allowedTools:
+          - bash
+          - read_file
+          - grep
+          - echo
+      output:
+        mode: json
+        schema:
+          type: object
+          properties:
+            project_type:
+              type: string
+              description: "node | python | rust | go | other"
+            test_command:
+              type: string
+              description: "base test command (e.g. 'bun test', 'pytest', 'cargo test')"
+            affected_tests:
+              type: string
+              description: "space-separated test file patterns (e.g. 'packages/core/src/**/*.test.ts'), empty string = skip testing"
+            build_command:
+              type: string
+              description: "build command, empty if not applicable"
+            smoke_commands:
+              type: string
+              description: "semicolon-separated smoke commands, empty if not applicable"
+            changed_summary:
+              type: string
+              description: "1-line summary of what changed"
+          required:
+            - project_type
+            - test_command
+            - affected_tests
+      prompt: |
+        Analyze the impact of the code changes and determine what tests to run.
+
+        Repo: {{input.repo_path}}
+        Level: {{input.review_level}}
+        Changed modules: {{nodes.review.changed_modules}}
+        Changed files: {{nodes.review.changed_files}}
+
+        ## Steps
+
+        1. Discover project type and test framework:
+           - Node: look for "test" script in package.json, or bun test, vitest, jest configs
+             → **如果是 Bun 项目（package.json 有 bun test 脚本或 lockfile 是 bun.lockb/bun.lock）**，
+                在 test_command 末尾自动加 ` --parallel=4`（如 `bun test --parallel=4`）。
+                CI 场景可保留不带 `--parallel=4` 的串行版本（如 `test_command_serial` 字段），
+                但默认 dev 验证走 4 并发。
+           - Python: pytest / unittest, look for pyproject.toml [tool.pytest]
+           - Rust: cargo test
+           - Go: go test ./...
+           - Other: Makefile test target
+
+        2. Find affected test files — ONLY tests related to changed modules/files:
+           - Map changed source files to their corresponding test files
+           - Example: changed `packages/core/src/foo/bar.ts` → test at `packages/core/src/foo/bar.test.ts`
+           - If changed files are config/docs only, output affected_tests=""
+           - If changes are in a specific package, only run that package's tests
+           - NEVER output all tests unless literally everything changed
+
+        3. Determine build command (for hard mode only):
+           - Node: "scripts.build" from package.json
+           - Python: pip install -e . / python setup.py build
+           - Rust: cargo build
+           - Go: go build ./...
+
+        4. Determine smoke commands (for hard mode only):
+           - CLI tool: the binary path + --help or --version
+           - Library: a quick inline import script
+           - Web app: start server, curl healthcheck, stop
+
+        5. Output JSON:
+           {
+             "project_type": "node|python|rust|go|other",
+             "test_command": "base test command",
+             "affected_tests": "space-separated globs or empty string",
+             "build_command": "build command or empty",
+             "smoke_commands": "semicolon-separated or empty",
+             "changed_summary": "1-line summary"
+           }
+
+        If level is "easy", output affected_tests="" and build_command="" and
+        smoke_commands="" and changed_summary="skipped (easy mode)".
+
+    depends_on:
+      - review
+
+  # ===========================================================
+  # VERIFY TESTS — run ONLY affected tests
+  # ===========================================================
+  - id: verify-tests
+    type: agent
+    name: Test Verifier
+    config:
+      agent_type: general
+      maxIterations: 6
+      options:
+        allowedTools:
+          - bash
+          - echo
+      output:
+        mode: json
+        schema:
+          type: object
+          properties:
+            all_passed:
+              type: boolean
+            pass_count:
+              type: integer
+            fail_count:
+              type: integer
+            failed_tests:
+              type: string
+            test_command:
+              type: string
+            note:
+              type: string
+          required:
+            - all_passed
+            - pass_count
+            - fail_count
+      prompt: |
+        Run affected tests only.
+
+        Repo: {{input.repo_path}}
+        Level: {{input.review_level}}
+        Test command: {{nodes.impact-analyze.test_command}}
+        Affected tests: {{nodes.impact-analyze.affected_tests}}
+        Project type: {{nodes.impact-analyze.project_type}}
+
+        ## Steps
+
+        1. If affected_tests is empty OR level is "easy":
+           output all_passed=true, pass_count=0, fail_count=0,
+           failed_tests="", test_command="", note="skipped"
+
+        2. Otherwise, cd to repo_path and run the test command targeting
+           ONLY the affected test patterns:
+           - Node/bun: cd {{input.repo_path}} && bun test {{nodes.impact-analyze.affected_tests}} --parallel=4 --timeout 30000 2>&1
+             → ⚠️ **Bun Test 加速铁律**：bun 项目默认带 `--parallel=4`（4.25x 加速）。
+                若发现 race-condition 失败（用 BUN_TEST_WORKER_ID 检测），fallback 到 `bun test ...`（不带 --parallel）重跑验证。
+           - Node/vitest: cd {{input.repo_path}} && npx vitest run {{nodes.impact-analyze.affected_tests}} 2>&1
+           - Python: cd {{input.repo_path}} && python -m pytest {{nodes.impact-analyze.affected_tests}} -x 2>&1
+           - Rust: cd {{input.repo_path}} && cargo test -p <affected_package> 2>&1
+           - Go: cd {{input.repo_path}} && go test {{nodes.impact-analyze.affected_tests}} 2>&1
+
+        3. Parse output → pass_count, fail_count, failed test names
+
+        4. Output JSON
+
+    depends_on:
+      - impact-analyze
+
+  # ===========================================================
+  # E2E VERIFY — build + smoke (hard only, impact-aware)
+  # ===========================================================
+  - id: e2e-verify
+    type: agent
+    name: E2E Verifier
+    config:
+      agent_type: general
+      maxIterations: 6
+      options:
+        allowedTools:
+          - bash
+          - echo
+      output:
+        mode: json
+        schema:
+          type: object
+          properties:
+            build_passed:
+              type: boolean
+            smoke_passed:
+              type: boolean
+            build_command:
+              type: string
+            smoke_command:
+              type: string
+            build_output:
+              type: string
+            smoke_output:
+              type: string
+            note:
+              type: string
+          required:
+            - build_passed
+            - smoke_passed
+      prompt: |
+        Build and smoke-test affected areas.
+
+        Repo: {{input.repo_path}}
+        Level: {{input.review_level}}
+        Build command: {{nodes.impact-analyze.build_command}}
+        Smoke commands: {{nodes.impact-analyze.smoke_commands}}
+        Changed summary: {{nodes.impact-analyze.changed_summary}}
+
+        ## Steps
+
+        1. If level is NOT "hard":
+           output build_passed=true, smoke_passed=true, build_command="",
+           smoke_command="", build_output="", smoke_output="",
+           note="skipped (non-hard mode)". STOP.
+
+        2. cd to repo_path, run build command, capture output
+
+        3. If smoke_commands is non-empty, run each (split by ;):
+           cd {{input.repo_path}} && <command> 2>&1
+
+        4. Output JSON: build_passed, smoke_passed, build_command,
+           smoke_command, build_output, smoke_output, note
+
+        If build fails, set smoke_passed=false and stop (don't run smoke).
+
+    depends_on:
+      - verify-tests
+
+  # ===========================================================
+  # OUTPUT
+  # ===========================================================
+  - id: output
+    type: tool
+    name: Print Report
+    config:
+      tool: echo
+      message: |
+        ╔══════════════════════════════════════════╗
+        ║          CODE REVIEW REPORT              ║
+        ╠══════════════════════════════════════════╣
+        ║ Level:    {{input.review_level}}
+        ║ Score:    {{nodes.review.overall_score}}/100
+        ║ Verdict:  {{nodes.review.verdict}}
+        ╟──────────────────────────────────────────╢
+        ║ Changed:  {{nodes.impact-analyze.changed_summary}}
+        ║ Modules:  {{nodes.review.changed_modules}}
+        ╟──────────────────────────────────────────╢
+        ║ Tests:    {{nodes.verify-tests.pass_count}} pass
+        ║           {{nodes.verify-tests.fail_count}} fail
+        ║           {{nodes.verify-tests.failed_tests}}
+        ╟──────────────────────────────────────────╢
+        ║ Build:    {{nodes.e2e-verify.build_passed}}
+        ║ Smoke:    {{nodes.e2e-verify.smoke_passed}}
+        ╟──────────────────────────────────────────╢
+        ║ Issues:
+        ║   {{nodes.review.top_issues}}
+        ╟──────────────────────────────────────────╢
+        ║ Summary:
+        ║   {{nodes.review.summary}}
+        ╚══════════════════════════════════════════╝
+
+    depends_on:
+      - e2e-verify
+
+entry: __default_entry__

@@ -1,0 +1,173 @@
+# Complex Multi-Node Data Processing Pipeline
+#
+# This workflow demonstrates complex orchestration patterns:
+# - Parallel execution branches (fetch-users, fetch-products, fetch-orders)
+# - Diamond merge pattern (merge-data → validate-data → process-*)
+# - Conditional execution (generate-report)
+# - Nested workflow calls (create-report)
+# - Retry logic with exponential backoff (process-users)
+# - Multiple output definitions
+#
+# Diagram:
+#
+#   init
+#    ├── fetch-users ──┐
+#    ├── fetch-products├──→ merge-data → validate-data ──┬─→ process-users* ─┐
+#    └── fetch-orders ──┘                                 ├─→ process-products─┼→ finalize-results
+#                                                        │                    │
+#                                                        └─→ (optional report)─┘
+#
+# * process-users has retry: { max_attempts: 3, backoff: exponential }
+
+name: complex-data-processing
+version: "1.0"
+description: Complex data processing pipeline with parallel branches, diamond patterns, and retry logic
+
+config:
+  parallel_limit: 3
+  timeout: 300000
+
+metadata:
+  author: Roy Agent
+  tags:
+    - data-processing
+    - pipeline
+    - complex
+    - production
+
+nodes:
+  # ========== Entry Point ==========
+  - id: init
+    type: tool
+    name: Initialize Pipeline
+    config:
+      tool: echo
+      message: "Starting data pipeline"
+
+  # ========== Parallel Data Fetch Branches ==========
+  - id: fetch-users
+    type: tool
+    name: Fetch Users
+    config:
+      tool: validator
+      source: users
+    depends_on:
+      - init
+
+  - id: fetch-products
+    type: tool
+    name: Fetch Products
+    config:
+      tool: validator
+      source: products
+    depends_on:
+      - init
+
+  - id: fetch-orders
+    type: tool
+    name: Fetch Orders
+    config:
+      tool: validator
+      source: orders
+    depends_on:
+      - init
+
+  # ========== Diamond Merge Pattern ==========
+  - id: merge-data
+    type: merge
+    name: Merge All Data
+    config:
+      strategy: collect
+    depends_on:
+      - fetch-users
+      - fetch-products
+      - fetch-orders
+
+  # ========== Conditional Validation ==========
+  - id: validate-data
+    type: condition
+    name: Validate Merged Data
+    config:
+      condition: "{{merge-data.valid}}"
+    depends_on:
+      - merge-data
+
+  # ========== Parallel Processing Branches ==========
+  - id: process-users
+    type: tool
+    name: Process Users
+    config:
+      tool: calculator
+      operation: user-scoring
+    depends_on:
+      - validate-data
+    retry:
+      max_attempts: 3
+      backoff: exponential
+      initial_delay: 1000
+
+  - id: process-products
+    type: tool
+    name: Process Products
+    config:
+      tool: calculator
+      operation: product-rating
+    depends_on:
+      - validate-data
+
+  # ========== Final Processing ==========
+  - id: finalize-results
+    type: tool
+    name: Finalize Results
+    config:
+      tool: echo
+      message: "Finalizing results"
+    depends_on:
+      - process-users
+      - process-products
+
+  # ========== Conditional Report Generation ==========
+  - id: generate-report
+    type: condition
+    name: Check Report Generation
+    config:
+      condition: "{{input.generateReport}}"
+    depends_on:
+      - finalize-results
+
+  # ========== Nested Workflow Call ==========
+  - id: create-report
+    type: nested
+    name: Create Report
+    config:
+      workflow: report-generation
+    depends_on:
+      - generate-report
+
+  # ========== Output ==========
+  - id: output
+    type: tool
+    name: Output Results
+    config:
+      tool: echo
+      message: "Pipeline complete"
+    depends_on:
+      - create-report
+
+# ========== Outputs ==========
+outputs:
+  - name: final_result
+    source: output
+    path: result
+
+  - name: user_data
+    source: process-users
+    path: result
+
+  - name: product_data
+    source: process-products
+    path: result
+
+  - name: report_url
+    source: create-report
+    path: output.reportUrl

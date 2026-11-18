@@ -1,0 +1,52 @@
+name: strict-task-agent-resume-demo
+version: "1.0"
+description: |
+  Simplified strict-task-agent-like workflow for resume E2E verification.
+  Mimics plan -> execute -> verify -> output flow without LLM dependency.
+  Each node takes ~2s. Total ~8s.
+
+  Test scenarios:
+  1. Fresh run completes in ~8s
+  2. Kill CLI at ~5s -> state: plan done, execute done, verify in-progress (only start msg)
+  3. Resume with -s -> verify completes, output runs, workflow completes
+
+entry: plan
+
+config:
+  parallel_limit: 1
+  timeout: 30000
+
+nodes:
+  - id: plan
+    type: tool
+    name: Plan
+    config:
+      tool: bash
+      command: "echo '[plan] analyzing task' && sleep 2 && echo '[plan] done'"
+
+  - id: execute
+    type: tool
+    name: Execute
+    config:
+      tool: bash
+      command: "echo '[execute] running task' && sleep 2 && echo '[execute] done'"
+    depends_on:
+      - plan
+
+  - id: verify
+    type: tool
+    name: Verify
+    config:
+      tool: bash
+      command: "echo '[verify] checking results' && sleep 2 && echo '[verify] done'"
+    depends_on:
+      - execute
+
+  - id: output
+    type: tool
+    name: Output
+    config:
+      tool: bash
+      command: "echo '[output] all complete'"
+    depends_on:
+      - verify

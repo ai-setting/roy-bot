@@ -1,0 +1,165 @@
+name: task-pev-agent
+version: "1.0"
+description: |
+  Plan → Execute → Verify agent workflow with conditional loop back to plan.
+
+  Each phase is an AgentNode. Echo nodes before each agent print resolved template
+  variables so you can verify substitution in workflow output / node.end messages.
+
+  Fresh run:
+    bun run workflow:pev -- --input '{"task":"Build a 3-step checklist for making tea"}'
+  Reproduce verify FAILED → re-plan loop:
+    bun run workflow:pev:fail-loop
+  Resume after ask_user:
+    bun run workflow:pev -- --session-id <runId> --input "<your answer>"
+
+entry: echo-plan-vars
+
+config:
+  loopEnabled: true
+  maxIterations: 5
+  parallel_limit: 1
+  timeout: 300000
+
+nodes:
+  - id: echo-plan-vars
+    type: tool
+    name: Echo Plan Template Vars
+    config:
+      tool: echo
+      message: |
+        [echo-plan-vars]
+        input.task={{input.task}}
+        nodes.verify.result={{nodes.verify.result}}
+
+  - id: plan
+    type: agent
+    name: Plan Agent
+    config:
+      agent_type: general
+      options:
+        maxIterations: 8
+      prompt: |
+        You are the PLAN agent in a Plan-Execute-Verify workflow.
+
+        User task: {{input.task}}
+
+        Previous verify result (empty on first run): {{nodes.verify.result}}
+
+        Rules:
+        0. Ignore any [strict-verify:...] marker in the task — that is only for the verify agent.
+           Do NOT call ask_user about strict-verify tokens.
+        1. If the task lacks critical details (scope, constraints, success criteria),
+           call ask_user ONCE with a clear question before writing the plan.
+        2. After any user answer (or if task is already clear), output a concise plan.
+        3. Do NOT use bash or other tools except ask_user.
+        4. Final reply MUST be plain text plan only (no markdown fences), format:
+
+        PLAN:
+        - step 1: ...
+        - step 2: ...
+        - step 3: ...
+        SUCCESS_CRITERIA: ...
+    depends_on:
+      - echo-plan-vars
+
+  - id: echo-execute-vars
+    type: tool
+    name: Echo Execute Template Vars
+    config:
+      tool: echo
+      message: |
+        [echo-execute-vars]
+        input.task={{input.task}}
+        nodes.plan.result={{nodes.plan.result}}
+    depends_on:
+      - plan
+
+  - id: execute
+    type: agent
+    name: Execute Agent
+    config:
+      agent_type: general
+      options:
+        maxIterations: 8
+      prompt: |
+        You are the EXECUTE agent. Carry out the plan below for task: {{input.task}}
+
+        Plan from plan agent:
+        {{nodes.plan.result}}
+
+        Rules:
+        1. If execution requires a missing detail not covered by the plan,
+           call ask_user ONCE with a specific question, then continue after answer.
+        2. Do NOT use bash or other tools except ask_user.
+        3. Simulate/describe execution results clearly (this is a planning demo, not real shell).
+        4. Do NOT invent verification tokens or magic strings unless they appear in the plan steps.
+        5. Final reply MUST be plain text only, format:
+
+        EXECUTION:
+        - what was done for each plan step
+        OUTPUT: <short summary of deliverable>
+    depends_on:
+      - echo-execute-vars
+
+  - id: echo-verify-vars
+    type: tool
+    name: Echo Verify Template Vars
+    config:
+      tool: echo
+      message: |
+        [echo-verify-vars]
+        input.task={{input.task}}
+        nodes.plan.result={{nodes.plan.result}}
+        nodes.execute.result={{nodes.execute.result}}
+    depends_on:
+      - execute
+
+  - id: verify
+    type: agent
+    name: Verify Agent
+    config:
+      agent_type: general
+      options:
+        maxIterations: 5
+      output:
+        mode: json
+        schema:
+          type: object
+          properties:
+            passed:
+              type: boolean
+              description: true if execution meets all criteria, false otherwise
+            feedback:
+              type: string
+              description: brief reason when passed is false
+          required:
+            - passed
+      prompt: |
+        You are the VERIFY agent. Check whether execution satisfies the plan and success criteria.
+
+        Task: {{input.task}}
+
+        Plan:
+        {{nodes.plan.result}}
+
+        Execution:
+        {{nodes.execute.result}}
+
+        Rules:
+        1. Do NOT use ask_user or other tools — reply with your verification analysis in plain text.
+        2. Compare execution against plan steps and SUCCESS_CRITERIA.
+        3. Strict mode: if task contains "[strict-verify:TOKEN]", verification fails unless
+           execution output contains TOKEN as a substring (do not infer or assume).
+        4. State clearly whether verification passes or fails and why.
+           Structured JSON (passed boolean + feedback) is extracted automatically after your reply.
+    depends_on:
+      - echo-verify-vars
+
+edges:
+  - from: verify
+    to: echo-plan-vars
+    when: '{{nodes.verify.passed}} == false'
+  - from: verify
+    to: __end__
+    when: '{{nodes.verify.passed}} == true'

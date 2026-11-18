@@ -1,0 +1,526 @@
+name: a-stock-screener-v0.7.1
+version: "0.7.1"
+description: |
+  A 股投资选股 workflow v0.7.1 — 在 v0.7.0 基础上修复 4 类运行时问题：
+
+  ## v0.7.0 → v0.7.1 变更（Task #2384 实际运行发现的问题修复）
+
+  ### P0 修复：kline.fetch_ohlc DateLike 类型
+  `investment_strategy.data.kline.fetch_ohlc` 收到 `datetime.date` 后调用
+  `start_date.replace("-", "")` 触发 `datetime.date.replace(year, month, day)`
+  TypeError，导致 473/473 候选全部 `entry_open_unavailable`。
+
+  修复：`fetch_ohlc` / `open_price_on_date` / `close_price_on_date` 统一通过
+  `_to_iso` / `_to_ak_date` 助手规范化 str / date / datetime / pandas.Timestamp
+  输入；DateLike ↔ YYYYMMDD / YYYY-MM-DD 转换在边界统一完成。
+
+  ### P1 修复：factor_panel.csv 自动生成 + risk_assess 消费 candidates
+  `reports/factor_panel.csv` 之前从未生成，导致 v4-scoring / ml-prediction /
+  aggregate 三个节点全部空转。risk_assess 与 run_strategies 的 contract 也
+  错位（前者要 `candidates` 列表，后者只返回 markdown 路径）。
+
+  修复：
+  - `run_strategies.run()` 现在返回 `candidates: List[Dict]`（含 code/name/
+    score/metrics/risk/strategies，去重 + 保留最高分 + 合并策略名）以及
+    `factor_panel_path: str`（自动生成 panel，含 schema：date / code /
+    value_score / market_cap_yi / change_pct / volume_ratio / turnover /
+    composite_score / return_pct）。
+  - `risk_assess.run()` 现在优先消费 `strategies_output.candidates`，仅在
+    旧格式（dict 不含 candidates）时才 fallback 到 markdown 报告解析。
+
+  ### P2 修复：run-strategies 显式消费 market-timing JSON-string
+  `market-timing.recommendation.active_strategies` 是 list，workflow python_call
+  节点将其序列化为 JSON 字符串 `'["value","composite","sector_rotation"]'`；
+  原解析 `[s.strip() for s in active_strategies.strip("[]").split(",")]` 留下
+  残留的 JSON 引号 `"value"`，导致 `STRATEGY_REGISTRY["\"value\""]` 查找失败，
+  最终走 `ALL_STRATEGIES` fallback，BEAR 市场的高风险策略未被暂停。
+
+  修复：新增 `_parse_active_strategies(value)` helper — 优先 `json.loads`，
+  fallback 逗号分割；未知策略名静默跳过；空 list 触发 fatal。
+
+  ## 行为变更
+
+  - **v0.7.0 默认 BEAR 市场仍跑全部 7 个策略 → v0.7.1 严格按 market-timing
+    暂停列表过滤**（BEAR 下 momentum / hot_money / dragon_leader 不再被打分）
+  - **v0.7.0 holding_pnl 473/473 全部 skipped → v0.7.1 真实产出净利 / 净收益率**
+  - **v0.7.0 v4-scoring / ml-prediction / aggregate 空转 → v0.7.1 真实消费
+    factor_panel.csv**（如启用 ML）
+  - **v0.7.0 risk_assess n_stocks_assessed=0 → v0.7.1 正确消费 run_strategies
+    输出的 candidates 列表**
+
+  ## 保留 v0.7.0 设计
+
+  - 入场/出场口径（Q1=A）保持不变
+  - fee_model 默认值与 schema 不变
+  - holding_days 默认 5 不变
+  - enable_holding_pnl 默认 true
+  - 11 个其他节点（除上述修复涉及的 4 个）与 v0.7.0 100% 兼容
+
+  ## 关联任务
+
+  - Task #2384: 真实运行暴露 4 类问题
+  - Task #2381: Phase A 实施（feat/backtest-holding-days-fee）
+  - Task #2379: v0.7.0 设计
+
+  索引示例（holding_days=5，假设 T₁=07-02 周四）：
+    T₁=07-02, T₂=07-03, T₃=07-06, T₄=07-07, T₅=07-08, T₆=07-09 卖出
+
+  off-by-one：用户输入 `holding_days=N` 即「持有 N 个完整交易日」=「T₁ 到 T₅」，卖出在 T₆ 开盘
+
+  示例费后净利润（默认值下）：
+    入场 T₁ open=10.00 → 出场 T₆ open=11.50，100 股 (1 手)
+    gross_pnl = (11.50 - 10.00) × 100 = 150.00
+    buy_cost  = max(10.00 × 100 × 0.00025, 5) + 1000 × 0.00001 = 5.10
+    sell_cost = max(11.50 × 100 × 0.00025, 5) + 1150 × 0.001 + 1150 × 0.00001 = 16.5215
+    net_pnl   = 150.00 - 5.10 - 16.5215 = 128.3785
+    net_return = 128.3785 / 1000 = 12.84%
+
+  ## 用户可通过 input.fee_model 整体覆盖
+  ## 上一版本：v0.7.0 (audit)；当前版本：v0.7.1
+
+  ### 1. 新增回测能力（核心）
+  在 backtest 节点引入「信号→下一可交易日开盘买入→持有 N 个交易日→N+1 交易日开盘卖出」的
+  round-trip 收益模拟，并按 A 股成本模型扣除交易费用。
+
+  ### 2. 入场/出场口径（无未来函数 — Q1=A 已锁定）
+  - **入场**：信号日 S 的下一可交易日 T₁，T₁ 开盘价买入
+  - **持有**：从 T₁ 到 Tₙ（共 N 个完整交易日）
+  - **出场**：Tₙ₊₁ 开盘价卖出
+
+  索引示例（holding_days=5，假设 T₁=07-02 周四）：
+  ```
+  交易日         T₁    T₂    T₃    T₄    T₅    T₆   (T₆ = T₅₊₁)
+  日期      07-02  07-03  07-06  07-07  07-08  07-09
+  操作      BUY@open ──── 持有 N=5 个完整交易日 ──── SELL@open
+  status    ────────────────────────────────────────── filled
+  ```
+
+  关键不变量：
+  - 入场价 = T₁ 的 `open` 字段（不复用 `report_price`，因为 `report_price` 是信号日收盘价，含未来）
+  - 出场价 = T₆ 的 `open` 字段
+  - off-by-one：用户输入 `holding_days=N` 即「持有 N 个完整交易日」=「T₁ 到 T₅」，卖出在 T₆ 开盘
+
+  ### 3. A 股成本模型（可配置 — 不写死常量）
+  ```json
+  {
+    "commission_rate": 0.00025,    // 万2.5（双边征收）
+    "min_commission": 5.0,          // 单笔最低 5 元（监管下限）
+    "stamp_tax_rate": 0.001,        // 0.1%（仅卖出）
+    "transfer_fee_rate": 0.00001,   // 0.001%（双边，A 股实际值）
+    "slippage": 0.0,                // 默认关闭；可设 0.001 (0.1%)
+    "rounding": "half_up"           // 金额保留 2 位小数，四舍五入
+  }
+  ```
+  - 用户可通过 input.fee_model 整体覆盖
+  - 默认值为常见 A 股散户费率（非写死常量，是参数）
+  - 详见 docs/a-stock-screener-v0.7.0-fee-model.md（待补）
+
+  ### 4. 输出 schema（per-stock + 组合汇总）
+  每只候选股：
+  ```json
+  {
+    "code": "600030",
+    "name": "中信证券",
+    "strategy": "value",
+    "signal_date": "2026-07-01",
+    "entry_date": "2026-07-02",
+    "entry_price": 29.50,
+    "exit_date": "2026-07-09",
+    "exit_price": 28.20,
+    "holding_days_planned": 5,
+    "holding_days_actual": 5,
+    "shares": 100,
+    "status": "filled",        // filled | skipped_suspended | skipped_limit_locked | skipped_insufficient_history | pending
+    "skip_reason": null,
+    "actual_exit_date": "2026-07-09",
+    "gross_pnl": -130.00,
+    "buy_cost": 5.74,          // max(29.5*100*0.00025, 5) + 29.5*100*0.00001 = 5 + 0.0295
+    "sell_cost": 7.87,         // 28.2*100*0.00025=0.705+5(max)=5.705+stamp 2.82+transfer 0.00282
+    "slippage_cost": 0.00,     // 默认 0
+    "total_cost": 13.61,
+    "net_pnl": -143.61,
+    "gross_return_pct": -4.41,
+    "net_return_pct": -4.87,
+    "bm_return_pct": -4.91,    // HS300 over same window
+    "excess_return_pct": 0.04,
+    "beat_market": true
+  }
+  ```
+  组合汇总（顶层 summary 字段）：
+  ```json
+  {
+    "summary": {
+      "n_total": 50, "n_filled": 45, "n_skipped": 3, "n_pending": 2,
+      "n_skipped_suspended": 2, "n_skipped_limit_locked": 1, "n_skipped_insufficient_history": 0,
+      "total_gross_pnl": 12345.67, "total_buy_cost": 250.0, "total_sell_cost": 312.45,
+      "total_slippage_cost": 0.0, "total_cost": 562.45, "total_net_pnl": 11783.22,
+      "win_rate_pct": 55.6,
+      "avg_net_return_pct": 1.23, "median_net_return_pct": 0.85,
+      "avg_excess_return_pct": 0.34,
+      "by_strategy": {"value": {...}, "composite": {...}, ...}
+    },
+    "config_used": {
+      "holding_days": 5, "entry_mode": "next_open", "exit_mode": "N+1_open",
+      "fee_model": {...}, "shares_per_lot": 100
+    }
+  }
+  ```
+
+  ### 5. 边界处理（不伪造收益）
+  - **停牌**：OHLC 收盘价连续缺失 → status=skipped_suspended，skip_reason="连续 N 日无成交"
+  - **涨停无法买入**：T₁ open=涨停价（10% for normal / 20% for 创板/科创板/北交所）
+    → status=skipped_limit_locked，skip_reason="T1 涨停无法成交"
+  - **跌停无法卖出**：Tₙ₊₁ open=跌停价 → status=skipped_limit_locked，skip_reason="T(N+1) 跌停无法成交"
+  - **历史不足 N 日**：信号日距最新行情 < N+1 个交易日 → status=pending，
+    actual_exit_date=null，明确标注「样本未到」
+  - **OHLC 缺失**：akshare 返回空 → status=skipped_insufficient_history
+  - **涨跌停判别**：normal=±10%, 创板/科创板/北交所=±20%, ST=±5%
+    （用代码前缀 + 名称关键字判断）
+
+  ### 6. 兼容方案（不破坏 v0.6.0）
+  - v0.6.0 workflow 继续保留独立运行
+  - v0.7.0 是新 workflow，新输入全部有默认值；旧输入 schema 完全继承
+  - 当 `enable_holding_pnl="false"` 时，backtest.run 退化为 v0.6.0 行为
+    （仅输出 A/B/C 三方案对比 + details.csv，不计算 holding N 日 PnL）
+  - 默认 `enable_holding_pnl="true"`
+
+  ### 7. ⚠️ 依赖代码（尚未实现，禁止注册入册）
+  以下 callable 必须先在 investment-strategy 仓库的 feat/backtest-holding-days-fee 分支实现：
+  1. `investment_strategy.fee.AStockFeeModel` (新模块) — 成本计算
+  2. `investment_strategy.trading_calendar` (新模块) — A 股交易日历（next_trading_day, n_trading_days_after）
+  3. `investment_strategy.scripts.backtest.run` 扩展 — 新增 holding_days/fee_model/entry_mode/exit_mode
+     /shares_per_lot/ohlc_cache_dir/enable_holding_pnl 参数；新增 per-stock + summary 输出
+  4. `investment_strategy.data.kline` (新模块) — OHLC 抓取 + pkl 缓存（ak.stock_zh_a_daily 包装）
+
+  验收标准详见 reports/2026-07-24-v0.7.0-design.md（待补）
+
+config:
+  parallel_limit: 1
+  timeout: 1800000
+  maxIterations: 100
+  loopEnabled: false
+
+input:
+  type: object
+  properties:
+    # ==================== v0.6.0 旧输入（保持兼容，默认值不变） ====================
+    feishu_publish:
+      type: string
+      enum: ["true", "false"]
+      default: "true"
+      description: 是否推送飞书
+    base_top_n:
+      type: integer
+      default: 20
+      description: 基础推荐 top_n（择时会动态调整）
+    consensus_threshold:
+      type: integer
+      default: 2
+      description: 共识阈值（≥N 策略同时推荐）
+    enable_backtest:
+      type: string
+      enum: ["true", "false"]
+      default: "true"
+      description: 是否运行回测步骤
+    enable_dashboard:
+      type: string
+      enum: ["true", "false"]
+      default: "true"
+      description: 是否启动 Dashboard
+    enable_ml:
+      type: string
+      enum: ["true", "false"]
+      default: "true"
+      description: 是否启用 ML 预测
+    dashboard_port:
+      type: integer
+      default: 7789
+      description: Dashboard 端口
+    strategy_repo_path:
+      type: string
+      default: ""  # 默认空 → 用当前进程的 cwd
+      description: investment-strategy 仓库根路径（用于 cwd）。空字符串表示用当前工作目录。
+    python_bin:
+      type: string
+      default: "python3"
+      description: Python 解释器路径
+
+    # ==================== v0.7.0 新增输入 ====================
+    holding_days:
+      type: integer
+      default: 5
+      minimum: 1
+      maximum: 60
+      description: |
+        买入后持有 N 个完整交易日。
+        入场 = 信号日下一可交易日开盘；出场 = N+1 交易日开盘。
+        校验：1 ≤ N ≤ 60（超过 60 视为"长期持有"建议改 v0.8.0）。
+    enable_holding_pnl:
+      type: string
+      enum: ["true", "false"]
+      default: "true"
+      description: |
+        是否启用 v0.7.0 新增的「N 日持有 + 成本扣除」回测。
+        设为 "false" 时 backtest 节点退化为 v0.6.0 行为（仅 A/B/C 方案对比）。
+    fee_model:
+      type: string
+      default: '{"commission_rate":0.00025,"min_commission":5.0,"stamp_tax_rate":0.001,"transfer_fee_rate":0.00001,"slippage":0.0,"rounding":"half_up"}'
+      description: |
+        A 股成本模型 JSON 字符串。可覆盖任一字段；缺省字段用 backtest.run 内置 DEFAULT_FEE_MODEL。
+        字段：
+        - commission_rate: 佣金费率（双边，默认 0.00025 = 万2.5）
+        - min_commission: 单笔最低佣金（默认 5.0 元，监管下限）
+        - stamp_tax_rate: 印花税率（仅卖出，默认 0.001 = 0.1%）
+        - transfer_fee_rate: 过户费率（双边，默认 0.00001 = 0.001%）
+        - slippage: 滑点（双边对称，默认 0.0；可设 0.001 = 0.1%）
+        - rounding: 金额舍入模式（默认 "half_up"）
+    shares_per_lot:
+      type: integer
+      default: 100
+      description: |
+        每只股票模拟买入股数（A 股最小交易单位 100；用于成本/收益换算）。
+        仅在 dry-run 测算时使用，真实下单不在本 workflow 范围。
+    ohlc_cache_dir:
+      type: string
+      default: "/tmp/a-stock-screener/kline_cache"
+      description: |
+        OHLC K 线 pkl 缓存目录。backtest.run 在此目录下按 {code}_{days}_qfq.pkl 缓存。
+        首次抓取后命中缓存，秒级返回。
+
+nodes:
+  - id: load-candidates
+    type: tool
+    name: "Step 1: 加载候选股票池（占位 - 等待 investment-strategy 改造）"
+    config:
+      tool: bash
+      inputs:
+        timeout: 60000
+        command: |
+          echo "=== Step 1: 加载候选股票池（v0.7.0 placeholder）==="
+          echo "市场: A 股"
+          echo "数据源: akshare + baostock"
+          echo "新增: holding_days={{input.holding_days}}, enable_holding_pnl={{input.enable_holding_pnl}}"
+          echo ""
+          echo '{"candidates_loaded": 1800, "market": "A 股", "timestamp": "placeholder", "version": "v0.7.0"}'
+
+  # ===================================================================
+  # Step 1.5 — 大盘择时（与 v0.6.0 一致）
+  # ===================================================================
+  - id: market-timing
+    type: python_call
+    name: "Step 1.5: 大盘择时（HS300 60MA + RSRS）"
+    config:
+      module: investment_strategy.scripts.market_timing
+      function: run
+      args:
+        base_top_n: "{{input.base_top_n}}"
+        output: "reports/market_state.json"
+      cwd: "{{input.strategy_repo_path}}"
+      python: "{{input.python_bin}}"
+      timeout: 120000
+    depends_on:
+      - load-candidates
+
+  # ===================================================================
+  # Step 2 — 运行策略（与 v0.6.0 一致）
+  # ===================================================================
+  - id: run-strategies
+    type: python_call
+    name: "Step 2: 运行策略（动态调整）"
+    config:
+      module: investment_strategy.scripts.run_strategies
+      function: run
+      args:
+        active_strategies: "{{nodes.market-timing.output.recommendation.active_strategies}}"
+        recommended_top_n: "{{nodes.market-timing.output.recommendation.recommended_top_n}}"
+        with_risk: true
+      cwd: "{{input.strategy_repo_path}}"
+      python: "{{input.python_bin}}"
+      timeout: 1800000
+    depends_on:
+      - market-timing
+
+  # ===================================================================
+  # Step 3 — 风险评估（与 v0.6.0 一致）
+  # ===================================================================
+  - id: risk-assess
+    type: python_call
+    name: "Step 3: 风险评估"
+    config:
+      module: investment_strategy.scripts.risk_assess
+      function: run
+      args:
+        strategies_output: "{{nodes.run-strategies.output}}"
+      cwd: "{{input.strategy_repo_path}}"
+      python: "{{input.python_bin}}"
+      timeout: 300000
+    depends_on:
+      - run-strategies
+
+  # ===================================================================
+  # Step 4 — Phase 1 安全过滤（与 v0.6.0 一致）
+  # ===================================================================
+  - id: apply-phase1-filters
+    type: python_call
+    name: "Step 4: Phase 1 安全过滤（退市/ST）"
+    config:
+      module: investment_strategy.scripts.apply_filters
+      function: run
+      args: {}
+      cwd: "{{input.strategy_repo_path}}"
+      python: "{{input.python_bin}}"
+      timeout: 60000
+    depends_on:
+      - risk-assess
+
+  # ===================================================================
+  # Step 4.5 — 多策略共识过滤（与 v0.6.0 一致）
+  # ===================================================================
+  - id: consensus-filter
+    type: python_call
+    name: "Step 4.5: 多策略共识过滤"
+    config:
+      module: investment_strategy.scripts.consensus_filter
+      function: run
+      args:
+        threshold: "{{input.consensus_threshold}}"
+        output: "reports/latest_consensus.md"
+      cwd: "{{input.strategy_repo_path}}"
+      python: "{{input.python_bin}}"
+      timeout: 60000
+    depends_on:
+      - apply-phase1-filters
+
+  # ===================================================================
+  # Step 5 — v0.4 新评分模型（与 v0.6.0 一致）
+  # ===================================================================
+  - id: v4-scoring
+    type: python_call
+    name: "Step 5: v0.4 新评分模型（IC 驱动权重）"
+    config:
+      module: investment_strategy.scripts.scoring_v4
+      function: run
+      args:
+        validate_ic: true
+      cwd: "{{input.strategy_repo_path}}"
+      python: "{{input.python_bin}}"
+      timeout: 60000
+    depends_on:
+      - consensus-filter
+
+  # ===================================================================
+  # Step 5.5 — LightGBM 模型预测（与 v0.6.0 一致）
+  # ===================================================================
+  - id: ml-prediction
+    type: python_call
+    name: "Step 5.5: LightGBM 模型预测"
+    config:
+      module: investment_strategy.scripts.ml_factor_model
+      function: run
+      args:
+        enabled: "{{input.enable_ml}}"
+      cwd: "{{input.strategy_repo_path}}"
+      python: "{{input.python_bin}}"
+      timeout: 600000
+    depends_on:
+      - v4-scoring
+
+  # ===================================================================
+  # Step 6 — 因子分析 + Top N 汇总（与 v0.6.0 一致）
+  # ===================================================================
+  - id: aggregate
+    type: python_call
+    name: "Step 6: 因子分析 + Top N 汇总"
+    config:
+      module: investment_strategy.scripts.full_factor_report
+      function: run
+      args: {}
+      cwd: "{{input.strategy_repo_path}}"
+      python: "{{input.python_bin}}"
+      timeout: 600000
+    depends_on:
+      - ml-prediction
+
+  # ===================================================================
+  # Step 7 — 回测【v0.7.0 扩展：N 日持有 + 成本扣除】
+  # ===================================================================
+  # v0.7.0 关键变化：args 扩展 holding_days / fee_model / entry_mode / exit_mode
+  # / shares_per_lot / ohlc_cache_dir / enable_holding_pnl
+  # 当 enable_holding_pnl="false" 时，行为完全等同 v0.6.0 backtest 节点
+  # ===================================================================
+  - id: backtest
+    type: python_call
+    name: "Step 7: 回测对比 + N 日持有 PnL（含 A 股成本扣除）"
+    config:
+      module: investment_strategy.scripts.backtest
+      function: run
+      args:
+        # v0.6.0 旧参数
+        enabled: "{{input.enable_backtest}}"
+        # v0.7.0 新增参数
+        enable_holding_pnl: "{{input.enable_holding_pnl}}"
+        holding_days: "{{input.holding_days}}"
+        fee_model: "{{input.fee_model}}"
+        entry_mode: "next_open"      # 当前仅支持此模式；预留 schema
+        exit_mode: "N+1_open"        # 当前仅支持此模式；预留 schema
+        shares_per_lot: "{{input.shares_per_lot}}"
+        ohlc_cache_dir: "{{input.ohlc_cache_dir}}"
+      cwd: "{{input.strategy_repo_path}}"
+      python: "{{input.python_bin}}"
+      timeout: 600000
+    depends_on:
+      - aggregate
+
+  # ===================================================================
+  # Step 8 — Dashboard 启动（保持 bash，长驻服务）
+  # ===================================================================
+  - id: dashboard
+    type: tool
+    name: "Step 8: 启动 FastAPI Dashboard"
+    config:
+      tool: bash
+      inputs:
+        timeout: 30000
+        command: |
+          set -e
+          if [ "{{input.enable_dashboard}}" = "true" ]; then
+            pkill -f "scripts/dashboard.py" 2>/dev/null || true
+            sleep 2
+            cd "{{input.strategy_repo_path}}" 2>/dev/null || cd .
+            nohup {{input.python_bin}} -m investment_strategy.scripts.dashboard > /tmp/dashboard.log 2>&1 &
+            sleep 3
+            PORT={{input.dashboard_port}}
+            if curl -s http://localhost:$PORT/api/overview > /dev/null 2>&1; then
+              echo "✅ Dashboard 启动成功: http://localhost:$PORT/"
+            else
+              echo "❌ Dashboard 启动失败"
+              tail -20 /tmp/dashboard.log
+            fi
+          else
+            echo "⏭️ 跳过（enable_dashboard=false）"
+          fi
+    depends_on:
+      - backtest
+
+  # ===================================================================
+  # Step 9 — 飞书推送（保持 bash — 调 lark-cli）
+  # ===================================================================
+  - id: publish-report
+    type: tool
+    name: "Step 9: 推送飞书"
+    config:
+      tool: bash
+      inputs:
+        timeout: 60000
+        command: |
+          if [ "{{input.feishu_publish}}" = "true" ]; then
+            echo "📄 准备飞书推送..."
+            cd "{{input.strategy_repo_path}}" 2>/dev/null || cd .
+            {{input.python_bin}} -m investment_strategy.scripts.feishu_publish
+          else
+            echo "⏭️ 跳过（feishu_publish=false）"
+          fi
+          echo ""
+          echo "✅ v0.7.0 workflow 全部完成"
+    depends_on:
+      - dashboard

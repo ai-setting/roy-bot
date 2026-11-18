@@ -1,0 +1,30 @@
+{
+  "appId": "com.roy-bot.desktop",
+  "productName": "Roy Agent Desktop",
+  "directories": {
+    "output": "release"
+  },
+  "files": [
+    "dist/**/*",
+    "electron/dist/**/*",
+    "package.json"
+  ],
+  "extraMetadata": {
+    "main": "electron/dist/main.js"
+  },
+  "asar": false,
+  "asarUnpack": [
+  ],
+  "mac": {
+    "target": "dmg",
+    "category": "public.app-category.developer-tools"
+  },
+  "linux": {
+    "target": "AppImage",
+    "category": "Development"
+  },
+  "win": {
+    "target": "nsis"
+  },
+  "npmRebuild": false
+}

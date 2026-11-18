@@ -1,0 +1,10 @@
+{
+  "name": "@ai-setting/roy-bot-integration-test",
+  "version": "1.0.0",
+  "description": "Integration tests for @ai-setting/roy-bot-* packages",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node test.mjs"
+  }
+}

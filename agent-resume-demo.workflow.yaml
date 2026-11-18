@@ -1,0 +1,51 @@
+name: agent-resume-demo
+version: "1.0"
+description: |
+  Agent node pause/resume demo for CLI verification.
+  Flow: start (echo) -> agent-confirm (ask_user via agent) -> finish (echo)
+  Fresh run:  bun run packages/cli/dist/bin/roy-bot.js workflow run agent-resume-demo.workflow.yaml --file --debug --input '{"userName":"demo-user"}'
+  Resume:       bun run packages/cli/dist/bin/roy-bot.js workflow run agent-resume-demo --session-id <runId> --input "Yes"
+
+entry: start
+
+config:
+  parallel_limit: 1
+  timeout: 180000
+
+nodes:
+  - id: start
+    type: tool
+    name: Start
+    config:
+      tool: echo
+      message: "agent-resume-demo: started for user={{input.userName}}"
+
+  - id: agent-confirm
+    type: agent
+    name: Agent Confirm
+    config:
+      agent_type: general
+      options:
+        maxIterations: 5
+      prompt: |
+        You are a workflow confirmation step. Do not use any tools except ask_user.
+
+        Step 1 (required on first turn): Call ask_user exactly once with:
+          query: "Proceed with demo task for user {{input.userName}}?"
+          options: ["Yes", "No"]
+
+        Step 2 (after user responds): Reply with exactly one line:
+          CONFIRMED: <the user's answer>
+
+        Do not skip Step 1. Do not call bash or other tools.
+    depends_on:
+      - start
+
+  - id: finish
+    type: tool
+    name: Finish
+    config:
+      tool: echo
+      message: "agent-resume-demo: finished after agent confirmation"
+    depends_on:
+      - agent-confirm

@@ -1,0 +1,133 @@
+# Multi-Node Type Orchestration
+#
+# Demonstrates chaining different node types in a realistic AI pipeline:
+# - ToolNode (data preparation)
+# - AgentNode (AI analysis)
+# - ToolNode (validation)
+# - AgentNode (decision making)
+# - SkillNode (data transformation)
+# - WorkflowNode (sub-process)
+# - ToolNode (final output)
+#
+# Diagram:
+#
+# prepare-data (tool)
+#       │
+#       ↓
+# analyze-data (agent)
+#       │
+#       ↓
+# validate-analysis (tool)
+#       │
+#       ↓
+# make-decision (agent)
+#       │
+#       ↓
+# transform-data (skill)
+#       │
+#       ↓
+# process-workflow (workflow)
+#       │
+#       ↓
+# format-output (tool)
+
+name: multi-node-type-orchestration
+version: "1.0"
+description: Orchestration across Tool, Agent, Skill, and Workflow nodes
+
+metadata:
+  author: Roy Agent
+  tags:
+    - multi-node
+    - orchestration
+    - ai-pipeline
+
+nodes:
+  # ========== Step 1: Tool - Data Preparation ==========
+  - id: prepare-data
+    type: tool
+    name: Prepare Input Data
+    config:
+      tool: echo
+      message: "Preparing initial data"
+    depends_on: []
+
+  # ========== Step 2: Agent - Analysis ==========
+  - id: analyze-data
+    type: agent
+    name: AI Data Analyst
+    config:
+      agent_type: general
+      prompt: "Analyze the input data: {{prepare-data.output}}. Provide insights."
+    depends_on:
+      - prepare-data
+
+  # ========== Step 3: Tool - Validate Analysis ==========
+  - id: validate-analysis
+    type: tool
+    name: Validate Analysis Results
+    config:
+      tool: validator
+      source: analysis
+    depends_on:
+      - analyze-data
+
+  # ========== Step 4: Agent - Decision Making ==========
+  - id: make-decision
+    type: agent
+    name: Decision Agent
+    config:
+      agent_type: general
+      prompt: "Based on analysis: {{analyze-data.output}}, decide next steps."
+    depends_on:
+      - validate-analysis
+
+  # ========== Step 5: Skill - Transform Data ==========
+  - id: transform-data
+    type: skill
+    name: Data Transformation Skill
+    config:
+      skill: data-transform
+      input:
+        data: "{{analyze-data.output}}"
+        format: json
+    depends_on:
+      - make-decision
+
+  # ========== Step 6: Nested Workflow ==========
+  - id: process-workflow
+    type: workflow
+    name: Sub-Process Workflow
+    config:
+      workflow_name: data-processing-subflow
+      input:
+        source: "{{transform-data.output}}"
+    depends_on:
+      - transform-data
+
+  # ========== Step 7: Tool - Final Output ==========
+  - id: format-output
+    type: tool
+    name: Format Final Output
+    config:
+      tool: calculator
+      operation: format
+    depends_on:
+      - process-workflow
+
+outputs:
+  - name: analysis_result
+    source: analyze-data
+    path: output
+
+  - name: decision
+    source: make-decision
+    path: output
+
+  - name: transformed_data
+    source: transform-data
+    path: output
+
+  - name: final_result
+    source: format-output
+    path: result

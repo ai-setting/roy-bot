@@ -1,0 +1,64 @@
+# Test Ask User Workflow
+name: test-ask-user
+version: "1.0"
+description: Test workflow that asks user for confirmation before proceeding
+
+metadata:
+  author: Roy Agent
+  tags:
+    - test
+    - ask-user
+    - pause-resume
+
+nodes:
+  # ========== Entry: Prepare context ==========
+  - id: prepare
+    type: tool
+    config:
+      tool: echo
+      params:
+        message: "Preparing workflow context..."
+    depends_on: []
+
+  # ========== Agent: Ask user for confirmation ==========
+  - id: agent-ask
+    type: agent
+    config:
+      agent_type: general
+      prompt: |
+        You are preparing to execute a sensitive operation.
+        
+        Task: Create a new file at /tmp/test-output.txt with content "Hello, World!"
+        
+        Before proceeding, you MUST ask the user for confirmation using the ask_user tool.
+        
+        Call the ask_user tool with:
+        - query: "Do you want to create the file at /tmp/test-output.txt?"
+        - options: ["Yes", "No"]
+        
+        Wait for user response before continuing.
+    depends_on:
+      - prepare
+
+  # ========== Final: Execute after confirmation ==========
+  - id: execute
+    type: tool
+    config:
+      tool: echo
+      params:
+        message: "User confirmed! Creating file at /tmp/test-output.txt..."
+    depends_on:
+      - agent-ask
+
+outputs:
+  - name: context
+    source: prepare
+    path: output
+
+  - name: agent_response
+    source: agent-ask
+    path: output
+
+  - name: final_result
+    source: execute
+    path: output

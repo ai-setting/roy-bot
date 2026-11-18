@@ -1,0 +1,126 @@
+name: Publish Desktop App to GitHub Releases
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (latest, beta, next)'
+        required: false
+        default: 'latest'
+        type: choice
+        options:
+          - latest
+          - beta
+          - next
+  release:
+    types: [published]
+
+env:
+  NODE_VERSION: "20"
+  PNPM_VERSION: "9"
+
+jobs:
+  # ============================================
+  # Get version
+  # ============================================
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    outputs:
+      desktop_version: ${{ steps.versions.outputs.desktop_version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Get desktop version
+        id: versions
+        run: |
+          DESKTOP_VER=$(node -p 'require("./packages/desktop/package.json").version')
+          echo "desktop_version=$DESKTOP_VER" >> $GITHUB_OUTPUT
+          echo "## Desktop version: $DESKTOP_VER"
+
+  # ============================================
+  # Build desktop app (multi-platform matrix)
+  # ============================================
+  build-desktop:
+    name: Build Desktop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact_pattern: "*.AppImage"
+          - os: macos-latest
+            artifact_pattern: "*.dmg"
+          - os: windows-latest
+            artifact_pattern: "*.exe"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install pnpm
+        run: npm install -g pnpm@${{ env.PNPM_VERSION }}
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.13"
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build desktop app
+        run: bun run build:desktop
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.os }}
+          path: packages/desktop/release/${{ matrix.artifact_pattern }}
+          retention-days: 1
+
+  # ============================================
+  # Publish to GitHub Releases
+  # ============================================
+  publish-desktop:
+    name: Publish to GitHub Releases
+    runs-on: ubuntu-latest
+    needs: [prepare, build-desktop]
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -la artifacts/
+
+      - name: Publish to GitHub Releases
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ needs.prepare.outputs.desktop_version }}
+          name: v${{ needs.prepare.outputs.desktop_version }}
+          draft: false
+          prerelease: ${{ inputs.tag == 'beta' || inputs.tag == 'next' }}
+          files: artifacts/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

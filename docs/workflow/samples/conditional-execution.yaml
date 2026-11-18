@@ -1,0 +1,129 @@
+# Conditional Execution Workflow
+#
+# Demonstrates conditional branching:
+# - Dynamic path selection based on runtime conditions
+# - Multiple conditional branches
+# - Merge after conditional paths
+#
+# Diagram:
+#
+#   init
+#     │
+# check-mode ──┬─→ mode-a-1 → mode-a-2 ──┐
+#     │        └─→ mode-b-1 → mode-b-2 ──┼─→ merge-cond → final-check → output
+#     │                                   │
+#     └─→ (alternative path) ─────────────┘
+
+name: conditional-execution
+version: "1.0"
+description: Conditional execution with multiple branches and dynamic path selection
+
+metadata:
+  author: Roy Agent
+  tags:
+    - conditional
+    - branching
+    - dynamic
+
+nodes:
+  # ========== Entry ==========
+  - id: init
+    type: tool
+    name: Initialize
+    config:
+      tool: echo
+      message: "Starting conditional workflow"
+    depends_on: []
+
+  # ========== First Condition ==========
+  - id: check-mode
+    type: condition
+    name: Check Mode
+    config:
+      condition: "{{input.mode}}"
+    depends_on:
+      - init
+
+  # ========== Mode A Path ==========
+  - id: mode-a-1
+    type: tool
+    name: Mode A Step 1
+    config:
+      tool: calculator
+      operation: mode-a-1
+    depends_on:
+      - check-mode
+
+  - id: mode-a-2
+    type: tool
+    name: Mode A Step 2
+    config:
+      tool: calculator
+      operation: mode-a-2
+    depends_on:
+      - mode-a-1
+
+  # ========== Mode B Path ==========
+  - id: mode-b-1
+    type: tool
+    name: Mode B Step 1
+    config:
+      tool: validator
+      operation: validate-b1
+    depends_on:
+      - check-mode
+
+  - id: mode-b-2
+    type: tool
+    name: Mode B Step 2
+    config:
+      tool: validator
+      operation: validate-b2
+    depends_on:
+      - mode-b-1
+
+  # ========== Merge After Conditional Paths ==========
+  - id: merge-cond
+    type: merge
+    name: Merge Conditional Paths
+    config:
+      strategy: collect
+    depends_on:
+      - mode-a-2
+      - mode-b-2
+
+  # ========== Final Check ==========
+  - id: final-check
+    type: condition
+    name: Final Validation
+    config:
+      condition: "{{merge-cond.valid}}"
+    depends_on:
+      - merge-cond
+
+  # ========== Output ==========
+  - id: output
+    type: tool
+    name: Output Results
+    config:
+      tool: echo
+      message: "Conditional workflow complete"
+    depends_on:
+      - final-check
+
+outputs:
+  - name: mode_a_result
+    source: mode-a-2
+    path: result
+
+  - name: mode_b_result
+    source: mode-b-2
+    path: result
+
+  - name: merged_result
+    source: merge-cond
+    path: inputs
+
+  - name: final_validation
+    source: final-check
+    path: conditionMet

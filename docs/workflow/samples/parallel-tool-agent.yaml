@@ -1,0 +1,146 @@
+# Parallel Tool-Agent Branches
+#
+# Multiple parallel branches, each with Tool → Agent pattern:
+# - Each branch fetches data with a tool, then processes with an agent
+# - Results are merged and aggregated by a final agent
+#
+# Diagram:
+#
+#          start (tool)
+#          /    |    \
+#     tool-a  tool-b  tool-c
+#         |      |      |
+#     agent-a agent-b agent-c
+#          \    |    /
+#           merge-agents
+#               |
+#        aggregate-results (agent)
+#               |
+#            output (tool)
+
+name: parallel-tool-agent-branches
+version: "1.0"
+description: Multiple parallel branches with Tool and Agent nodes
+
+metadata:
+  author: Roy Agent
+  tags:
+    - parallel
+    - tool
+    - agent
+    - branches
+
+nodes:
+  # ========== Entry ==========
+  - id: start
+    type: tool
+    name: Start
+    config:
+      tool: echo
+      message: "Starting parallel processing"
+    depends_on: []
+
+  # ========== Branch A: Tool → Agent ==========
+  - id: tool-a
+    type: tool
+    name: Tool A - Fetch Data
+    config:
+      tool: calculator
+      operation: fetch-a
+    depends_on:
+      - start
+
+  - id: agent-a
+    type: agent
+    name: Agent A - Process Data
+    config:
+      agent_type: general
+      prompt: "Process and analyze data from tool-a: {{tool-a.output}}"
+    depends_on:
+      - tool-a
+
+  # ========== Branch B: Tool → Agent ==========
+  - id: tool-b
+    type: tool
+    name: Tool B - Fetch Data
+    config:
+      tool: validator
+      source: data-b
+    depends_on:
+      - start
+
+  - id: agent-b
+    type: agent
+    name: Agent B - Process Data
+    config:
+      agent_type: general
+      prompt: "Process and analyze data from tool-b: {{tool-b.output}}"
+    depends_on:
+      - tool-b
+
+  # ========== Branch C: Tool → Agent ==========
+  - id: tool-c
+    type: tool
+    name: Tool C - Fetch Data
+    config:
+      tool: echo
+      message: "Fetching data from source C"
+    depends_on:
+      - start
+
+  - id: agent-c
+    type: agent
+    name: Agent C - Process Data
+    config:
+      agent_type: general
+      prompt: "Process and analyze data from tool-c: {{tool-c.output}}"
+    depends_on:
+      - tool-c
+
+  # ========== Merge Point ==========
+  - id: merge-agents
+    type: merge
+    name: Merge All Agent Outputs
+    config:
+      strategy: collect
+    depends_on:
+      - agent-a
+      - agent-b
+      - agent-c
+
+  # ========== Aggregation ==========
+  - id: aggregate-results
+    type: agent
+    name: Aggregation Agent
+    config:
+      agent_type: general
+      prompt: "Aggregate and summarize results from all branches. Provide a unified summary."
+    depends_on:
+      - merge-agents
+
+  # ========== Output ==========
+  - id: output
+    type: tool
+    name: Output Final Result
+    config:
+      tool: echo
+      message: "Processing complete"
+    depends_on:
+      - aggregate-results
+
+outputs:
+  - name: branch_a_result
+    source: agent-a
+    path: output
+
+  - name: branch_b_result
+    source: agent-b
+    path: output
+
+  - name: branch_c_result
+    source: agent-c
+    path: output
+
+  - name: aggregated_result
+    source: aggregate-results
+    path: output

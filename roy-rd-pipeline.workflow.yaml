@@ -1,0 +1,1658 @@
+name: roy-rd-pipeline
+version: "1.3"
+description: >
+  统一的 R&D 研发工作流 — 支持 feature / bug / refactor 三大任务类型。
+
+
+  包含 9 个独立节点（串行执行，保证每阶段产物被下阶段读取）。
+
+  阶段 5"修复问题"是阶段 4 的失败回环（loop back），不是独立节点。
+    Phase 1  init-task         — 任务管理（task_search 找相似 + task_create + task_update active）
+    Phase 2  setup-worktree    — Worktree 隔离（git worktree add，幂等检查避免重复创建）
+    Phase 3  plan              — 设计与计划（brainstorming + writing-plans skills，输出 plan doc）
+    Phase 4  tdd-implement     — TDD 严格循环（RED → GREEN → REFACTOR，test-driven-development skill；含 bun test 4 并发加速提示）
+    Phase 5  code-review       — Code Review（requesting-code-review skill，输出 BLOCKING/IMPORTANT/MINOR/NIT 分级；含 bun test 4 并发加速提示）
+    Phase 6  cli-e2e-test      — 命令行级 E2E（agent: roy 调 bash 跑 build + unit tests + CLI smoke；提交 JSON 输出 cli_e2e_status）
+    Phase 7  final-verify      — 最终验证（verification-before-completion skill，8 项 checklist；含 bun test 4 并发加速提示）
+    Phase 8  merge-to-main     — 可选合并（agent: roy 调 bash 执行 git merge；auto_merge 必须显式 "true" 才执行；冲突自动 rebase；merge 后跑 build/test 验证 main 未被破坏；提交 JSON 输出 merge_status）
+    Phase 9  summary-report    — 总结报告（写入 reports/<task_id>-rd-summary.md + task_complete）
+
+  v1.3 baseline regression testing：tdd-implement / code-review / cli-e2e-test / final-verify 在修改前持久化 baseline，在修改后用同一命令集合做 category-wise set-diff；pre-existing test/lint/typecheck/build/CLI smoke failures 不阻断，新增稳定 failure ID 才判定 regression。JSON capture 缺失、损坏、命令集合漂移、跨 worktree 或无法解析的非零退出均 fail-closed。
+
+  ⚠️ 合并主分支铁律：
+    - merge-to-main 节点的 `auto_merge` 参数必须显式为 "true" 才执行 merge
+    - 默认 "false"，节点会跳过 merge 并输出 MERGE_SKIPPED
+    - 即使 auto_merge=true，merge 前必须用 git merge-tree 预检冲突，冲突时自动 rebase 解决
+    - merge 后必须跑 build/test 验证 main 仍健康，否则回滚
+    - worktree 保留（不清理），等用户最终验收
+
+  与现有 workflow 的区别：
+    - feature-development: 缺 plan 节点、缺 code-review、merge-and-cleanup 不预检冲突
+    - feature-implementation / bug-investigation: 4 节点 PLAN/EXECUTE/VERIFY 模型，缺 worktree 隔离、CLI 级 e2e、可控 merge
+    - strict-task-agent-v522: 通用 PLAN/EXECUTE/VERIFY + resume gate，不是 R&D 专用模板
+
+  使用场景：所有 R&D 任务（feature / bug fix / refactor）均推荐使用此 workflow。
+config:
+  parallel_limit: 1
+  timeout: 1800000
+  maxIterations: 10
+  loopEnabled: true
+nodes:
+  - id: init-task
+    type: agent
+    name: "Phase 1: 任务管理 (task_search → task_create → task_update active)"
+    config:
+      agent_type: roy
+      output:
+        mode: json
+        schema:
+          type: object
+          description: 任务管理结果 — task_id 给后续节点使用
+          properties:
+            task_id:
+              type: integer
+            task_type:
+              type: string
+            branch:
+              type: string
+            worktree_path:
+              type: string
+            similar_tasks_referenced:
+              type: array
+              items:
+                type: integer
+          required:
+            - task_id
+            - task_type
+            - branch
+            - worktree_path
+      prompt: >
+        ## Phase 1: 任务管理
+
+
+        任务类型: {{input.task_type}}
+
+        任务标题: {{input.task_title}}
+
+        任务描述: {{input.task_description}}
+
+
+        ### Step 1.1: 搜索相似任务（强建议）
+
+        - 调用 task_search(keywords=["{{input.task_type}}",
+        "{{input.branch_name}}"], limit=5) 找相似历史任务
+
+        - 如果找到（如 #1770 plugin emit notification / #1993 install package-json /
+        #1975 ask-user-timeout），
+          在 task description 里追加引用 "参考任务: #XXX, #YYY"，供后续节点阅读
+        - 推荐相似任务模式（来自上一周 R&D 实践）：
+            - Feature: 多子任务（T-A 到 T-H），TDD + 集成测试 + build
+            - Bug fix: 根因调查 → RED 失败测试 → GREEN 最小修复 → CLI 实际复现 → build
+            - Refactor: 移除旧机制 + 重写 + typecheck + build 验证
+
+        ### Step 1.2: 创建任务
+
+        - 调用 task_create(
+            title="{{input.task_title}}",
+            description="{{input.task_description}}",
+            type="normal",
+            priority="{{input.task_priority}}",
+            tags=["{{input.task_type}}", "rd-pipeline", "{{input.branch_name}}"{{#if input.task_tags}}, {{input.task_tags}}{{/if}}]
+          )
+        - task_update(status="active", progress=5)
+
+        - task_operation_create(action_type="create", action_title="Task created
+        via roy-rd-pipeline v1.2")
+
+
+        ### Step 1.3: 写入 context（关键，给后续节点用）
+
+        - 调用 task_update(
+            task_id=<返回的 task_id>,
+            context='{"worktree_path": "{{input.project_path}}/.worktrees/{{input.branch_name}}",
+                      "branch": "{{input.task_type}}/{{input.branch_name}}",
+                      "task_type": "{{input.task_type}}",
+                      "base_branch": "{{input.base_branch}}",
+                      "pipeline_version": "1.0"}'
+          )
+
+        ### Step 1.4: 输出（CRITICAL — 必须调用 workflow_submit_output）
+
+        调用 `workflow_submit_output` 工具提交以下 JSON（**workflow engine 只会解析 workflow_submit_output 提交的 JSON**）：
+
+        ```json
+
+        {
+          "task_id": <number>,
+          "task_type": "{{input.task_type}}",
+          "branch": "{{input.task_type}}/{{input.branch_name}}",
+          "worktree_path": "{{input.project_path}}/.worktrees/{{input.branch_name}}",
+          "similar_tasks_referenced": [<task_ids>]
+        }
+
+        ```
+
+        - `task_id` 是后续所有节点读取任务状态的核心 ID
+        - **不要**用普通文本输出
+    depends_on: []
+  - id: setup-worktree
+    type: tool
+    name: "Phase 2: Worktree 隔离 (git worktree add，幂等检查)"
+    config:
+      tool: bash
+      command: >
+        set -euo pipefail
+
+        cd {{input.project_path}}
+
+
+        BRANCH="{{input.task_type}}/{{input.branch_name}}"
+
+        WORKTREE_PATH=".worktrees/{{input.branch_name}}"
+
+
+        # 幂等检查：worktree 已存在则跳过
+
+        if git worktree list | grep -q "$WORKTREE_PATH"; then
+          echo "WORKTREE_EXISTS: $WORKTREE_PATH"
+          echo "BRANCH: $BRANCH"
+          exit 0
+        fi
+
+
+        # 验证 base_branch 存在
+
+        if ! git rev-parse --verify "{{input.base_branch}}" >/dev/null 2>&1;
+        then
+          echo "ERROR: base_branch '{{input.base_branch}}' not found"
+          exit 1
+        fi
+
+
+        # 验证 branch 不与现有分支冲突
+
+        if git rev-parse --verify "$BRANCH" >/dev/null 2>&1; then
+          echo "ERROR: branch '$BRANCH' already exists; pick a different branch_name"
+          exit 2
+        fi
+
+
+        git worktree add "$WORKTREE_PATH" -b "$BRANCH" "{{input.base_branch}}"
+
+        echo "WORKTREE_CREATED: $WORKTREE_PATH"
+
+        echo "BRANCH: $BRANCH"
+
+        echo "BASE: {{input.base_branch}}"
+    depends_on:
+      - init-task
+  - id: plan
+    type: agent
+    name: "Phase 3: Plan (brainstorming + writing-plans skills)"
+    config:
+      agent_type: roy
+      output:
+        mode: json
+        schema:
+          type: object
+          description: Plan 阶段产物 — plan_doc 路径给 summary-report 引用
+          properties:
+            plan_doc:
+              type: string
+            estimated_files:
+              type: array
+              items:
+                type: string
+            tdd_test_count:
+              type: integer
+            risks:
+              type: array
+              items:
+                type: string
+          required:
+            - plan_doc
+            - estimated_files
+            - tdd_test_count
+            - risks
+      prompt: |
+        ## Phase 3: Plan（设计与计划）
+
+        工作目录: {{input.project_path}}/.worktrees/{{input.branch_name}}
+        任务 ID: <init-task 节点返回的 task_id>
+        任务类型: {{input.task_type}}
+        分支: {{input.task_type}}/{{input.branch_name}}
+
+        ### Step 3.0: 加载 skills（强制）
+        - skill("brainstorming") — 设计先行，避免过早写代码
+        - skill("writing-plans") — 结构化计划文档模板
+        - 如果是 bug 修复：额外加载 skill("systematic-debugging") 做根因调查
+
+        ### Step 3.1: 调研（必须有，不能跳过）
+        - 用 glob / grep / read_file 探索 worktree 内相关代码
+        - 读取 task_search 找到的相似任务（如 #1770, #1993, #1975, #1838, #1960）作为参考模式
+        - 列出关键文件路径（必须精确到行号或符号）
+
+        ### Step 3.2: 编写计划文档
+        - 在 worktree 内创建 docs/superpowers/plans/<YYYY-MM-DD>-<topic>-plan.md
+        - 必须包含以下小节：
+            ## 目标
+            ## 验收标准（至少 5 条可验证项）
+            ## 涉及文件清单（精确路径）
+            ## TDD 步骤（RED/GREEN/REFACTOR 具体内容）
+            ## 风险与依赖
+            ## 完成定义（DoD）
+
+        ### Step 3.3: 记录计划
+        - task_operation_create(
+            action_type="milestone",
+            action_title="PLAN completed: <one-line summary>",
+            action_description=<plan_doc path + 关键决策点>
+          )
+        - task_update(progress=15)
+
+        ### Step 3.4: 输出（CRITICAL — 必须调用 workflow_submit_output）
+
+        调用 `workflow_submit_output` 工具提交以下 JSON（**workflow engine 只会解析 workflow_submit_output 提交的 JSON**）：
+
+        ```json
+        {
+          "plan_doc": "docs/superpowers/plans/<date>-<topic>-plan.md",
+          "estimated_files": [<absolute paths>],
+          "tdd_test_count": <预计写的失败测试数>,
+          "risks": [<关键风险>]
+        }
+        ```
+
+        - **不要**用普通文本输出
+        ⚠️ 如果是 refactor 任务，必须明确写出 "保留什么 / 移除什么 / 重写什么" 三段，避免大爆炸重写。
+    depends_on:
+      - setup-worktree
+  - id: tdd-implement
+    type: agent
+    name: "Phase 4: TDD 严格循环 (RED → GREEN → REFACTOR)"
+    config:
+      agent_type: roy
+      output:
+        mode: json
+        schema:
+          type: object
+          description: TDD 循环结果 — tdd_status 决定下游分支（PASS→code-review / FAIL→self-loop 重做）
+          properties:
+            tdd_status:
+              type: string
+              description: '"PASS" 表示 RED→GREEN 新增测试通过且 test/lint/typecheck 均无 baseline 外新增 regression；pre-existing failures 可保留；"FAIL" 表示新增 regression 或 capture fail-closed，触发 self-loop'
+            test_count_added:
+              type: integer
+              description: 本次新增测试数
+            test_count_passing:
+              type: integer
+              description: 通过的测试数
+            pre_existing_failures:
+              type: integer
+              description: 已知 main 上的 pre-existing 失败数（不算回归）
+            files_modified:
+              type: array
+              description: 修改的文件绝对路径列表
+              items:
+                type: string
+            commits:
+              type: array
+              description: 本次提交的 commit hash 列表
+              items:
+                type: string
+            baseline_meta:
+              type: object
+              description: v1.3 baseline/modified capture 元数据与 set-diff 摘要（可选但若运行校验必须填写）
+              properties:
+                baseline_path:
+                  type: string
+                modified_path:
+                  type: string
+                invocation_hash:
+                  type: string
+                new_regressions:
+                  type: object
+                modified_unchanged_count:
+                  type: integer
+                modified_newly_fixed_count:
+                  type: integer
+          required:
+            - tdd_status
+            - test_count_added
+            - test_count_passing
+            - files_modified
+            - commits
+      prompt: >
+        ## Phase 4: TDD 严格循环
+
+
+        工作目录: {{input.project_path}}/.worktrees/{{input.branch_name}}
+
+        任务 ID: <init-task 节点返回的 task_id>
+
+
+        ### ⚡ Baseline regression testing protocol（v1.3 铁律）
+
+        本节点使用 baseline set-diff 评估 test/lint/typecheck/build/CLI smoke：
+        - **绝对零失败不是 PASS 条件**；pre-existing failures 不算 regression。
+        - 只看"是否引入 baseline 没有的新稳定失败"。
+        - 支持的 category（5 类）：`"test"` / `"lint"` / `"typecheck"` / `"build"` / `"cli-smoke"`。
+        - 真实功能/安全/代码审查 BLOCKING 问题仍照常阻断；本协议只豁免 pre-existing 测试/lint/类型/build/smoke 噪声。
+
+        #### 步骤 A — Capture baseline（改代码前；同一 worktree / 同 branch / 同 task_id）
+
+        1. `mkdir -p reports/`
+        2. 调用 capture 脚本（stage 与 category 由本节点专属 Step 指定；详见下方 Step 4.3.5）：
+           ```bash
+           bun scripts/capture-rd-pipeline-baseline.ts \
+             --stage <stage> \
+             --category <category_csv> \
+             --task-id <init-task 节点返回的 task_id> \
+             --out reports/<task_id>-<tag>-baseline.json
+           ```
+        3. 若 baseline.json 已存在 / schema 损坏 / task_id / worktree_path / invocation_hash 不一致 → task_operation_create(action_type="problem") → 终止本节点。self-loop 也只能复用首次 baseline。
+        4. 解析 baseline.failures[category] 为 sorted unique array；记录 timestamp + git rev-parse HEAD + invocation_hash。
+
+        #### 步骤 B — Capture modified（每次改完代码立即重捕）
+
+        1. 再跑 capture 脚本同一 stage/category 集合，写到 `reports/<task_id>-<tag>-modified-failures.json`。
+        2. `new_regressions[category] = diff`，其中 `diff = sorted(modified.failures[category]) - sorted(baseline.failures[category])`。
+        3. 若 `new_regressions` 任一 category 非空 → 立即修复 → 重 capture → 再 diff → 直到所有 new_regressions 为空。
+        4. 写入 baseline_meta { baseline_path, modified_path, invocation_hash, new_regressions, modified_unchanged_count, modified_newly_fixed_count }。
+
+        #### 步骤 C — Fail-Closed Rules（违反任一即 FAIL）
+
+        - baseline.json 缺失 / 损坏 / parse fail → 节点 FAIL（视为未捕获 baseline）。
+        - baseline.failures 与 modified.failures 的 invocation_hash 不一致 → 命令集合漂移 → 节点 FAIL。
+        - modified 缺失 baseline 存在的 category key → 节点 FAIL（捕获不完整）。
+        - capture exit 非零但 modified.failures 为空 → 节点 FAIL（无 stable failure ID）。
+        - 跨 worktree 切换 / capture timeout → 节点 FAIL。
+
+        > 节点专属执行步骤见 `Step 4.3.5: Baseline set-diff 验证`（在 Step 4.3 REFACTOR 之后、Step 4.4 跑全套测试 之前执行）。
+
+
+        ### Step 4.0: 加载 skills（强制）
+
+        - skill("test-driven-development") — TDD 铁律：先 RED 再 GREEN 再 REFACTOR
+
+        - skill("verification-before-completion") — 完成前必须跑测试验证
+
+
+        ### Step 4.1: RED（先写失败测试）
+
+        - 在 worktree 内写至少 1 个失败测试（推荐 2-3 个，覆盖边界）
+
+        - 跑测试确认失败 — 必须是功能缺失的失败，不是 typo 错
+
+        - task_operation_create(action_type="progress", action_title="RED:
+        failing test added")
+
+        - task_update(progress=30)
+
+
+        ### Step 4.2: GREEN（最小代码让测试通过）
+
+        - 实现最小代码（不要 over-engineer）
+
+        - 跑测试确认通过
+
+        - task_operation_create(action_type="progress", action_title="GREEN:
+        minimal fix implemented")
+
+        - task_update(progress=50)
+
+
+        ### Step 4.3: REFACTOR
+
+        - 提取辅助函数 / 改进命名 / 移除死代码
+
+        - 测试保持绿色（每次 refactor 后跑一次）
+
+        - task_operation_create(action_type="milestone", action_title="REFACTOR
+        complete")
+
+        - task_update(progress=65)
+
+
+        ### Step 4.3.5: Baseline set-diff 验证（v1.3 核心铁律）
+
+        本节点专属执行步骤，对应 v1.3 baseline regression protocol 的 步骤 A → 步骤 B → 步骤 C：
+
+        1. **步骤 A — Capture baseline**：在 Step 4.1 写任何代码**之前**（即 worktree 刚 setup 完、未做任何改动），运行：
+           ```bash
+           mkdir -p reports/
+           bun scripts/capture-rd-pipeline-baseline.ts \
+             --stage tdd \
+             --category test,lint,typecheck \
+             --task-id <init-task 节点返回的 task_id> \
+             --out reports/<task_id>-tdd-baseline.json
+           ```
+           - baseline.json 的 `invocation_hash` / `task_id` / `worktree_path` 不一致 → task_operation_create(problem) → 终止节点。
+           - self-loop 重做时**禁止覆盖** baseline，仅复用首次生成的 reports/<task_id>-tdd-baseline.json。
+
+        2. **步骤 B — Capture modified**：Step 4.1 RED / 4.2 GREEN / 4.3 REFACTOR 全部完成后，运行：
+           ```bash
+           bun scripts/capture-rd-pipeline-baseline.ts \
+             --stage tdd \
+             --category test,lint,typecheck \
+             --task-id <init-task 节点返回的 task_id> \
+             --out reports/<task_id>-tdd-modified-failures.json
+           bun scripts/verify-rd-pipeline-baseline.ts \
+             --baseline reports/<task_id>-tdd-baseline.json \
+             --modified reports/<task_id>-tdd-modified-failures.json
+           ```
+           - `new_regressions[category] = diff`，diff = sorted(modified) - sorted(baseline)。非空 → 立即修复 → 重 capture → 再 diff → 直到空。
+
+        3. **步骤 C — Fail-Closed Rules**：严格按上方协议段 `步骤 C` 校验；任一违反 → tdd_status = "FAIL"，触发 self-loop。
+
+        4. 将 baseline_meta 写入 workflow_submit_output：{ baseline_path, modified_path, invocation_hash, new_regressions, modified_unchanged_count, modified_newly_fixed_count }。本步骤是 tdd-implement 节点 v1.3 的唯一入口。
+
+        ### Step 5.2.5: Baseline regression 复审（v1.3 核心铁律）
+
+        本节点专属执行步骤，对应 v1.3 baseline regression protocol 的 步骤 A → 步骤 B → 步骤 C：
+
+        1. **步骤 A — Capture baseline（复用 tdd-implement）**：
+           - 读取 `reports/<task_id>-tdd-baseline.json`；不存在 → task_operation_create(problem) → review_status="NEEDS_FIX"。
+           - 校验 schema / task_id / worktree_path / invocation_hash；任一不一致 → FAIL。
+           - 在 worktree 内用**同一 stage=review, category=test** 重新跑一次 capture 作为自检：
+             ```bash
+             bun scripts/capture-rd-pipeline-baseline.ts \
+               --stage review \
+               --category test \
+               --task-id <init-task 节点返回的 task_id> \
+               --out reports/<task_id>-review-baseline.json
+             ```
+             该自检必须与 tdd-implement 的 baseline 同 invocation_hash；否则命令集合漂移 → FAIL。
+
+        2. **步骤 B — 跑 modified + set-diff**：
+           ```bash
+           bun scripts/capture-rd-pipeline-baseline.ts \
+             --stage review \
+             --category test \
+             --task-id <init-task 节点返回的 task_id> \
+             --out reports/<task_id>-review-modified-failures.json
+           bun scripts/verify-rd-pipeline-baseline.ts \
+             --baseline reports/<task_id>-review-baseline.json \
+             --modified reports/<task_id>-review-modified-failures.json
+           ```
+           - `new_regressions[test] = sorted(modified.test) - sorted(baseline.test)`。
+           - 若 new_regressions.test 非空 → 每个 ID 追加一行 `"regression: test:<id>"` 到 severity.blocking。
+
+        3. **步骤 C — Fail-Closed Rules**：严格按上方协议段 `步骤 C` 校验；任一违反 → review_status="NEEDS_FIX"，触发 loop back 到 tdd-implement。
+
+        4. `review_status="PASS"` 仅当 severity.blocking 为空 + new_regressions.test 为空 + 真实功能/API/测试/铁律无 BLOCKING 问题。**绝对零失败不是 PASS 条件**。
+
+        ### ⚡ Bun test 提示（统一使用 --parallel=4）
+
+        本项目 `bun test` **统一使用 `--parallel=4` 模式**：
+
+        ```bash
+        bun test <package_path> --parallel=4
+        # 例：bun test packages/core --parallel=4
+        # 例：bun test packages/cli --parallel=4
+        # 例：bun test tests/cli --parallel=4
+        ```
+
+        **📌 v1.3 判定：运行 modified capture + set-diff，不做 checkout/stash，不重写 baseline**
+
+        ```bash
+        bun scripts/capture-rd-pipeline-baseline.ts --stage tdd --category test,lint,typecheck --task-id <task_id> --out reports/<task_id>-modified-failures.json
+        bun scripts/verify-rd-pipeline-baseline.ts --baseline reports/<task_id>-baseline.json --modified reports/<task_id>-modified-failures.json
+        ```
+
+        test/lint/typecheck 当前计数只作 evidence；门禁只看新增稳定 ID 与 fail-closed reasons。`modified ⊆ baseline` 即无新增 regression，可 PASS。
+
+        ### Step 4.4: 跑全套测试
+
+        - 用 capture 脚本运行锁定的 test/lint/typecheck 命令；`{{input.test_command}}` 仅在与 baseline invocation 完全一致时可作为等价命令
+
+        - 记录 new_regressions、fixed_pre_existing、unchanged；pre-existing failures/warnings 不算回归
+
+        - task_operation_create(
+            action_type="milestone",
+            action_title="TDD cycle complete",
+            action_description="新增 <N> 测试，<M> 通过，<K> pre-existing failures 已文档化"
+          )
+
+        ### Step 4.5: 输出（CRITICAL — 必须调用 workflow_submit_output）
+
+        调用 `workflow_submit_output` 工具提交以下 JSON（**这是触发 loop 机制的关键**）：
+
+        ```json
+
+        {
+          "tdd_status": "PASS" | "FAIL",
+          "test_count_added": <n>,
+          "test_count_passing": <n>,
+          "pre_existing_failures": <n>,
+          "baseline_meta": {
+            "baseline_path": "reports/<task_id>-baseline.json",
+            "modified_path": "reports/<task_id>-modified-failures.json",
+            "invocation_hash": "<sha256>",
+            "new_regressions": {"test": [], "lint": [], "typecheck": []},
+            "modified_unchanged_count": <n>,
+            "modified_newly_fixed_count": <n>
+          },
+          "files_modified": [<absolute paths>],
+          "commits": [<commit hashes>]
+        }
+
+        ```
+
+        - `tdd_status` 决定下游分支："PASS" → 进入 code-review；"FAIL" → 触发 self-loop 回环到
+        tdd-implement 重做
+
+        - **不要**用普通文本输出 — workflow engine 只会解析 workflow_submit_output 提交的 JSON
+
+
+        ⚠️ 铁律：每个 commit 必须 atomic、独立可 revert、message 遵守 feat:/fix:/refactor: 前缀。
+    depends_on:
+      - plan
+  - id: code-review
+    type: agent
+    name: "Phase 5: Code Review (BLOCKING/IMPORTANT/MINOR/NIT 分级)"
+    config:
+      agent_type: roy
+      output:
+        mode: json
+        schema:
+          type: object
+          description: Code review 结果 — review_status 决定下游分支（PASS→cli-e2e-test /
+            NEEDS_FIX→tdd-implement 修复）
+          properties:
+            review_status:
+              type: string
+              description: '"PASS" 表示无功能/安全 BLOCKING 且 test/lint/typecheck 无 baseline 外新增 regression；pre-existing failures 不阻断；"NEEDS_FIX" 表示真实 blocking、新 regression 或 fail-closed reason'
+            severity:
+              type: object
+              properties:
+                blocking:
+                  type: array
+                  items:
+                    type: string
+                important:
+                  type: array
+                  items:
+                    type: string
+                minor:
+                  type: array
+                  items:
+                    type: string
+                nit:
+                  type: array
+                  items:
+                    type: string
+            test_coverage:
+              type: string
+            api_design:
+              type: string
+            recommendation:
+              type: string
+            commits_reviewed:
+              type: array
+              items:
+                type: string
+            baseline_meta:
+              type: object
+              description: v1.3 immutable baseline 与 modified set-diff 元数据
+              properties:
+                baseline_path:
+                  type: string
+                modified_path:
+                  type: string
+                invocation_hash:
+                  type: string
+            new_regressions:
+              type: object
+              description: test/lint/typecheck 各类 baseline 外新增稳定 failure/warning ID
+          required:
+            - review_status
+            - severity
+            - commits_reviewed
+      prompt: >
+        ## Phase 5: Code Review
+
+
+        工作目录: {{input.project_path}}/.worktrees/{{input.branch_name}}
+
+        任务 ID: <init-task 节点返回的 task_id>
+
+        ### ⚡ Baseline regression testing protocol（v1.3 铁律）
+
+        本节点不得从 feature 结果重建 baseline。读取 tdd-implement 在改生产代码前生成并 commit 的 immutable `reports/<task_id>-baseline.json`，然后运行同一 test/lint/typecheck 命令集合写 `reports/<task_id>-modified-failures.json`：
+
+        ```bash
+        bun scripts/capture-rd-pipeline-baseline.ts --stage tdd --category test,lint,typecheck --task-id <task_id> --out reports/<task_id>-modified-failures.json
+        bun scripts/verify-rd-pipeline-baseline.ts --baseline reports/<task_id>-baseline.json --modified reports/<task_id>-modified-failures.json
+        ```
+
+        - `new_regressions[k] = sorted(unique(modified.failures[k])) - sorted(unique(baseline.failures[k]))`；所有 key 为空，即 `modified ⊆ baseline`，哪怕有 pre-existing 非零 exit / warning 也通过 validation regression gate。
+        - baseline 只可复用不可覆盖；schema/task_id/worktree/invocation_hash 不一致、命令集合漂移、JSON 缺失/损坏、timeout、非零退出无法解析稳定 ID 均 fail-closed。
+        - 稳定 ID 为 `<category>:<file>:<symbol>:<line|errorCode>`，sorted + unique。每个新增 ID 追加到 `severity.blocking`：`regression:<category>:<id>`。
+        - validation baseline 豁免不影响功能正确性、安全性、API 破坏、数据丢失等 BLOCKING 判断。
+        - `review_status="PASS"` 仅当 blocking 为空且 test/lint/typecheck `new_regressions` 全空；important/minor/nit 仍按既有规则记录。
+        - task_operation_create(milestone) 必须附 baseline/modified 路径、invocation_hash 与 diff 摘要。
+
+        对比基准: {{input.base_branch}}...HEAD
+
+
+        ### ⚡ Baseline regression testing protocol（v1.3 铁律）
+
+        本节点使用 baseline set-diff 评估 test/lint/typecheck/build/CLI smoke：
+        - **绝对零失败不是 PASS 条件**；pre-existing failures 不算 regression。
+        - 只看"是否引入 baseline 没有的新稳定失败"。
+        - 支持的 category（5 类）：`"test"` / `"lint"` / `"typecheck"` / `"build"` / `"cli-smoke"`。
+        - 真实功能/安全/代码审查 BLOCKING 问题仍照常阻断；本协议只豁免 pre-existing 测试/lint/类型/build/smoke 噪声。
+
+        #### 步骤 A — Capture baseline（code-review 节点**复用** tdd-implement 节点已捕获的 baseline）
+
+        1. 读取 `reports/<task_id>-tdd-baseline.json`（tdd-implement 节点必须已写入；否则本节点 FAIL）。
+        2. 校验 schema / task_id / worktree_path / invocation_hash；不一致 → task_operation_create(problem) → FAIL。
+        3. 在 worktree 内再次运行 capture 脚本作为**自检**：
+           ```bash
+           bun scripts/capture-rd-pipeline-baseline.ts \
+             --stage review \
+             --category test \
+             --task-id <init-task 节点返回的 task_id> \
+             --out reports/<task_id>-review-baseline.json
+           ```
+           - 写入的 baseline.json 与 tdd-implement 的 invocation_hash 必须一致；否则命令漂移 → FAIL。
+
+        #### 步骤 B — Capture modified（跑 review 自检对应的 modified）
+
+        1. 跑 capture 同一 stage/category，写到 `reports/<task_id>-review-modified-failures.json`：
+           ```bash
+           bun scripts/capture-rd-pipeline-baseline.ts \
+             --stage review \
+             --category test \
+             --task-id <init-task 节点返回的 task_id> \
+             --out reports/<task_id>-review-modified-failures.json
+           bun scripts/verify-rd-pipeline-baseline.ts \
+             --baseline reports/<task_id>-review-baseline.json \
+             --modified reports/<task_id>-review-modified-failures.json
+           ```
+        2. `new_regressions[category] = diff`，diff = sorted(modified) - sorted(baseline)。
+
+        #### 步骤 C — Fail-Closed Rules（违反任一即 FAIL）
+
+        - baseline.json 缺失 / 损坏 / parse fail → 节点 FAIL（视为未捕获 baseline）。
+        - invocation_hash 不一致 → 命令集合漂移 → 节点 FAIL。
+        - capture exit 非零但 modified.failures 为空 → 节点 FAIL。
+        - 跨 worktree 切换 / capture timeout → 节点 FAIL。
+
+        > 节点专属执行步骤见 `Step 5.2.5: Baseline regression 复审`（在 Step 5.2 审查维度 之后、Step 5.3 分级输出 之前执行）。
+
+        ### Step 5.0: 加载 skills（强制）
+
+        - skill("requesting-code-review") — review checklist + 输出格式
+
+
+        ### Step 5.1: 收集 diff
+
+        - `git diff {{input.base_branch}}...HEAD --stat` — 文件级改动统计
+
+        - `git diff {{input.base_branch}}...HEAD` — 实际代码改动
+
+        - `git log {{input.base_branch}}..HEAD --oneline` — commit 列表
+
+
+        ### Step 5.2: 审查维度
+
+        - **功能正确性**：是否满足 plan 文档中的所有验收标准？
+
+        - **测试覆盖**：是否有 RED 测试 / 边界用例 / 反向断言？
+
+        - **API 设计**：命名清晰 / 参数合理 / 向后兼容？
+
+        - **代码质量**：类型安全 / 错误处理 / 无死代码 / 无遗留 TODO？
+
+        - **文档同步**：plan 文档 / README / JSDoc 是否同步更新？
+
+        - **铁律检查**：未直接 commit 到 main / 未破坏既有测试 / commit message 合规？
+
+
+        ### ⚡ Bun test 提示（统一使用 --parallel=4）
+
+        本项目 `bun test` **统一使用 `--parallel=4` 模式**：
+
+        ```bash
+        bun test <package_path> --parallel=4
+        # 例：bun test packages/core --parallel=4
+        # 例：bun test packages/cli --parallel=4
+        # 例：bun test tests/cli --parallel=4
+        ```
+
+        **📌 v1.3 判定：只复用 immutable baseline，运行 modified capture + set-diff**
+
+        禁止 checkout/stash 或在 review 阶段覆盖 baseline。测试通过数、lint warning 总数、type error 总数只作 evidence；仅 baseline 外新增稳定 ID 是 validation regression。
+
+        ### Step 5.3: 分级输出（CRITICAL — 必须调用 workflow_submit_output）
+
+        调用 `workflow_submit_output` 工具提交以下 JSON（**这是触发 loop 机制的关键**）：
+
+        ```json
+
+        {
+          "review_status": "PASS" | "NEEDS_FIX",
+          "severity": {
+            "blocking": [<必须立即修，否则阻断 merge 的问题>],
+            "important": [<应该修，但可以后续 PR>],
+            "minor": [<建议改进，不影响功能>],
+            "nit": [<纯风格 nit>]
+          },
+          "test_coverage": "<评估>",
+          "api_design": "<评估>",
+          "recommendation": "<改进建议或放行声明>",
+          "commits_reviewed": [<commit hashes>]
+        }
+
+        ```
+
+        - `review_status` 决定下游分支："PASS" → 进入 cli-e2e-test；"NEEDS_FIX" → 回环到
+        tdd-implement 重做
+
+        - **不要**用普通文本输出 — workflow engine 只会解析 workflow_submit_output 提交的 JSON
+
+
+        ### Step 5.4: 记录
+
+        - task_operation_create(
+            action_type="review",
+            action_title="Code review: <status>",
+            action_description=<完整 JSON>
+          )
+        - task_update(progress=75)
+
+
+        ### 关键规则
+
+        - 如果 blocking 数组非空 → review_status = "NEEDS_FIX"，下游 final-verify
+        节点会判定为失败并触发 loop back 到 tdd-implement
+
+        - 如果仅 important 数组非空 → review_status = "PASS"，但应在 summary 报告里记录为
+        follow-up
+
+        - 否则 → review_status = "PASS"
+    depends_on:
+      - tdd-implement
+  - id: cli-e2e-test
+    type: agent
+    name: "Phase 6: CLI E2E (build + unit tests + CLI smoke)"
+    config:
+      agent_type: roy
+      output:
+        mode: json
+        schema:
+          type: object
+          description: CLI E2E 验证结果 — cli_e2e_status 决定下游分支（PASS→final-verify /
+            FAIL→tdd-implement 修复）
+          properties:
+            cli_e2e_status:
+              type: string
+              description: '"PASS" 表示 build/test/cli_smoke 三阶段全部成功；"FAIL" 表示任一失败，触发回环到 tdd-implement'
+            build_ok:
+              type: boolean
+              description: build_command 是否 exit 0
+            build_exit_code:
+              type: integer
+            test_ok:
+              type: boolean
+              description: test_command 是否 exit 0
+            test_exit_code:
+              type: integer
+            test_count_passed:
+              type: integer
+              description: 通过的测试数（从 test log 解析）
+            test_count_failed:
+              type: integer
+              description: 失败的测试数（从 test log 解析）
+            cli_smoke_ok:
+              type: boolean
+              description: cli_smoke_command 是否 exit 0
+            cli_smoke_exit_code:
+              type: integer
+            fail_reason:
+              type: string
+              description: 任一阶段失败的原因描述（PASS 时为空）
+            build_log_tail:
+              type: string
+              description: build 日志末尾 10 行（用于 evidence）
+            test_log_tail:
+              type: string
+              description: test 日志末尾 20 行（用于 evidence）
+            cli_log_tail:
+              type: string
+              description: cli smoke 日志末尾 10 行（用于 evidence）
+          required:
+            - cli_e2e_status
+            - build_ok
+            - test_ok
+            - cli_smoke_ok
+      prompt: >
+        ## Phase 6: CLI E2E（命令行级端到端验证）
+
+
+        工作目录: {{input.project_path}}/.worktrees/{{input.branch_name}}
+
+        任务 ID: <init-task 节点返回的 task_id>
+
+
+        ### ⚡ Baseline regression testing protocol（v1.3 铁律）
+
+        本节点使用 baseline set-diff 评估 test/lint/typecheck/build/CLI smoke：
+        - **绝对零失败不是 PASS 条件**；pre-existing failures 不算 regression。
+        - 只看"是否引入 baseline 没有的新稳定失败"。
+        - 支持的 category（5 类）：`"test"` / `"lint"` / `"typecheck"` / `"build"` / `"cli-smoke"`。
+        - 真实功能/安全/代码审查 BLOCKING 问题仍照常阻断；本协议只豁免 pre-existing 测试/lint/类型/build/smoke 噪声。
+        - 本节点**分三段**（build / test / cli-smoke）各捕获 baseline + modified，节点专属步骤见 Step 6.1.b1 / 6.1.t1 / 6.1.c1 / 6.1.m1。
+
+        #### 步骤 A — Capture baseline（cli-e2e-test 节点在 build 之前先捕 3 段 baseline）
+
+        1. `mkdir -p reports/`
+        2. 跑三段 capture，分别写到独立 JSON：
+           ```bash
+           bun scripts/capture-rd-pipeline-baseline.ts \
+             --stage e2e --category build \
+             --task-id <init-task 节点返回的 task_id> \
+             --out reports/<task_id>-e2e-build-baseline.json
+           bun scripts/capture-rd-pipeline-baseline.ts \
+             --stage e2e --category test \
+             --task-id <init-task 节点返回的 task_id> \
+             --out reports/<task_id>-e2e-test-baseline.json
+           bun scripts/capture-rd-pipeline-baseline.ts \
+             --stage e2e --category cli-smoke \
+             --task-id <init-task 节点返回的 task_id> \
+             --out reports/<task_id>-e2e-cli-smoke-baseline.json
+           ```
+        3. 若 baseline.json 已存在 / schema 损坏 / task_id / worktree_path / invocation_hash 不一致 → task_operation_create(action_type="problem") → 终止本节点。
+        4. 解析各 baseline.failures[category] 为 sorted unique array。
+
+        #### 步骤 B — Capture modified（每段实际跑完 build/test/cli-smoke 后立即重捕）
+
+        1. 同样三段 capture，写到 modified JSON：
+           - `reports/<task_id>-e2e-build-modified-failures.json`
+           - `reports/<task_id>-e2e-test-modified-failures.json`
+           - `reports/<task_id>-e2e-cli-smoke-modified-failures.json`
+        2. `new_regressions[category] = diff`，diff = sorted(modified.failures) - sorted(baseline.failures)，三段各自算。
+        3. 三段任一非空 → cli_e2e_status = "FAIL"，fail_reason 填 `"regression:<category>:<first ID>"`。
+
+        #### 步骤 C — Fail-Closed Rules（违反任一即 FAIL）
+
+        - baseline.json 缺失 / 损坏 / parse fail → 节点 FAIL（视为未捕获 baseline）。
+        - 三段 baseline 与对应 modified 的 invocation_hash 不一致 → 命令集合漂移 → 节点 FAIL。
+        - modified 缺失 baseline 存在的 category key → 节点 FAIL（捕获不完整）。
+        - capture exit 非零但 modified.failures 为空 → 节点 FAIL（无 stable failure ID）。
+        - 跨 worktree 切换 / capture timeout → 节点 FAIL。
+
+        > 节点专属执行步骤见 `Step 6.1.b1 / 6.1.t1 / 6.1.c1 / 6.1.m1`（在 Step 6.1 三阶段 之中穿插执行）。
+
+        ### Step 6.0: 加载 skills（强制）
+
+        - skill("verification-before-completion") — 完成前必须独立跑所有验收命令
+
+
+        ### Step 6.1.b1: Build baseline + modified capture（v1.3）
+
+        1. **步骤 A — Capture baseline**（在跑 `{{input.build_command}}` 之前）：
+           ```bash
+           bun scripts/capture-rd-pipeline-baseline.ts \
+             --stage e2e --category build \
+             --task-id <init-task 节点返回的 task_id> \
+             --out reports/<task_id>-e2e-build-baseline.json
+           ```
+        2. 跑 `{{input.build_command}}`，记录 exit code + 日志到 `/tmp/rd_pipeline_build.log`。
+        3. **步骤 B — Capture modified**（build 跑完后立即）：
+           ```bash
+           bun scripts/capture-rd-pipeline-baseline.ts \
+             --stage e2e --category build \
+             --task-id <init-task 节点返回的 task_id> \
+             --out reports/<task_id>-e2e-build-modified-failures.json
+           bun scripts/verify-rd-pipeline-baseline.ts \
+             --baseline reports/<task_id>-e2e-build-baseline.json \
+             --modified reports/<task_id>-e2e-build-modified-failures.json
+           ```
+        4. `new_regressions[build] = sorted(modified.build) - sorted(baseline.build)`。非空 → `cli_e2e_status="FAIL"`，`fail_reason="regression:build:<first ID>"`，跳过后续阶段。
+        5. **步骤 C — Fail-Closed Rules**：见上方协议段；baseline 缺失 / 命令漂移 / capture timeout → 立即 FAIL。
+
+        ### Step 6.1.t1: Test baseline + modified capture（v1.3）
+
+        1. **步骤 A — Capture baseline**（在跑 `{{input.test_command}}` 之前，仅当 build OK 时执行）：
+           ```bash
+           bun scripts/capture-rd-pipeline-baseline.ts \
+             --stage e2e --category test \
+             --task-id <init-task 节点返回的 task_id> \
+             --out reports/<task_id>-e2e-test-baseline.json
+           ```
+        2. 跑 `{{input.test_command}}`，记录 exit code + pass/fail 数 + 日志到 `/tmp/rd_pipeline_test.log`。
+        3. **步骤 B — Capture modified**：
+           ```bash
+           bun scripts/capture-rd-pipeline-baseline.ts \
+             --stage e2e --category test \
+             --task-id <init-task 节点返回的 task_id> \
+             --out reports/<task_id>-e2e-test-modified-failures.json
+           bun scripts/verify-rd-pipeline-baseline.ts \
+             --baseline reports/<task_id>-e2e-test-baseline.json \
+             --modified reports/<task_id>-e2e-test-modified-failures.json
+           ```
+        4. `new_regressions[test] = sorted(modified.test) - sorted(baseline.test)`。非空 → `cli_e2e_status="FAIL"`，`fail_reason="regression:test:<first ID>"`，跳过后续阶段。
+        5. **步骤 C — Fail-Closed Rules**：同上。
+
+        ### Step 6.1.c1: CLI smoke baseline + modified capture（v1.3）
+
+        1. **步骤 A — Capture baseline**（在跑 `{{input.cli_smoke_command}}` 之前，仅当 build + test 都 OK 时执行）：
+           ```bash
+           bun scripts/capture-rd-pipeline-baseline.ts \
+             --stage e2e --category cli-smoke \
+             --task-id <init-task 节点返回的 task_id> \
+             --out reports/<task_id>-e2e-cli-smoke-baseline.json
+           ```
+        2. 跑 `{{input.cli_smoke_command}}`，记录 exit code + 日志到 `/tmp/rd_pipeline_cli.log`。
+        3. **步骤 B — Capture modified**：
+           ```bash
+           bun scripts/capture-rd-pipeline-baseline.ts \
+             --stage e2e --category cli-smoke \
+             --task-id <init-task 节点返回的 task_id> \
+             --out reports/<task_id>-e2e-cli-smoke-modified-failures.json
+           bun scripts/verify-rd-pipeline-baseline.ts \
+             --baseline reports/<task_id>-e2e-cli-smoke-baseline.json \
+             --modified reports/<task_id>-e2e-cli-smoke-modified-failures.json
+           ```
+        4. `new_regressions[cli-smoke] = sorted(modified.cli-smoke) - sorted(baseline.cli-smoke)`。非空 → `cli_e2e_status="FAIL"`，`fail_reason="regression:cli-smoke:<first ID>"`。
+        5. **步骤 C — Fail-Closed Rules**：同上。
+
+        ### Step 6.1.m1: 三段 aggregate diff（v1.3 收尾）
+
+        1. 汇总 new_regressions 字典：`{ build: [...], test: [...], cli-smoke: [...] }`。
+        2. 任一 category 非空 → `cli_e2e_status="FAIL"`，输出 new_regressions 到 fail_reason。
+        3. 全部空 → `cli_e2e_status="PASS"`，cli_e2e 节点视为通过，可进入 final-verify。
+        4. 写 task_operation_create(action_type="milestone", action_description=<new_regressions 字典 + 各 capture 路径>)。
+
+        ### Step 6.1: 执行三个阶段（按顺序，前一阶段失败则跳过后续）
+
+        - **阶段 1: BUILD** — 在 worktree 内调用 bash 工具运行 `{{input.build_command}}`，
+          记录 exit code（保存日志到 /tmp/rd_pipeline_build.log，末尾 10 行嵌入 evidence）
+
+        - **阶段 2: UNIT TESTS** — 仅当 build 成功时执行，运行 `{{input.test_command}}`，
+          记录 exit code 与 pass/fail 数（保存日志到 /tmp/rd_pipeline_test.log，末尾 20 行嵌入 evidence）
+
+        - **阶段 3: CLI SMOKE** — 仅当 build + tests 都成功时执行，运行 `{{input.cli_smoke_command}}`，
+          记录 exit code（保存日志到 /tmp/rd_pipeline_cli.log，末尾 10 行嵌入 evidence）
+
+        - ⚠️ 任一阶段失败：立即停止后续阶段，cli_e2e_status 设为 FAIL，
+          fail_reason 填该阶段名称（如 "build failed" / "test failed" / "cli smoke failed"）
+
+        - 全部阶段成功：cli_e2e_status = "PASS"
+
+        ### Step 6.2: 输出（CRITICAL — 必须调用 workflow_submit_output）
+
+        调用 `workflow_submit_output` 工具提交以下 JSON（**这是触发 loop 机制的关键**）：
+
+        ```json
+
+        {
+          "cli_e2e_status": "PASS" | "FAIL",
+          "build_ok": <boolean>,
+          "build_exit_code": <integer>,
+          "test_ok": <boolean>,
+          "test_exit_code": <integer>,
+          "test_count_passed": <integer>,
+          "test_count_failed": <integer>,
+          "cli_smoke_ok": <boolean>,
+          "cli_smoke_exit_code": <integer>,
+          "fail_reason": "<build failed | test failed | cli smoke failed | 空字符串>",
+          "build_log_tail": "<last 10 lines of build log>",
+          "test_log_tail": "<last 20 lines of test log>",
+          "cli_log_tail": "<last 10 lines of cli smoke log>"
+        }
+
+        ```
+
+        - `cli_e2e_status` 决定下游分支："PASS" → 进入 final-verify；"FAIL" → 回环到 tdd-implement 重做
+
+        - **不要**用普通文本输出 — workflow engine 只会解析 workflow_submit_output 提交的 JSON
+
+
+        ### Step 6.3: 记录
+
+        - task_operation_create(
+            action_type="milestone",
+            action_title="CLI E2E: <status>",
+            action_description=<完整 JSON + 三个阶段日志摘要>
+          )
+        - task_update(progress=85)
+    depends_on:
+      - code-review
+  - id: final-verify
+    type: agent
+    name: "Phase 7: 最终验证 (8 项 checklist + verification-before-completion)"
+    config:
+      agent_type: roy
+      output:
+        mode: json
+        schema:
+          type: object
+          description: Final verify 结果 — verify_status 决定下游分支（PASS→merge-to-main /
+            FAIL→tdd-implement 修复）
+          properties:
+            verify_status:
+              type: string
+              description: '"PASS" 表示 8 项 checklist 全部通过；"FAIL" 表示任一失败，触发回环到 tdd-implement'
+            checklist:
+              type: object
+              description: 8 项 checklist 逐项布尔结果
+              properties:
+                goals_verified:
+                  type: boolean
+                plan_doc_verified:
+                  type: boolean
+                evidence_collected:
+                  type: boolean
+                no_obvious_issues:
+                  type: boolean
+                review_passed:
+                  type: boolean
+                build_passes:
+                  type: boolean
+                tests_pass:
+                  type: boolean
+                cli_smoke_passes:
+                  type: boolean
+            failed_items:
+              type: array
+              items:
+                type: string
+            evidence:
+              type: object
+              properties:
+                build_exit_code:
+                  type: integer
+                test_exit_code:
+                  type: integer
+                cli_smoke_exit_code:
+                  type: integer
+          required:
+            - verify_status
+            - checklist
+            - failed_items
+      prompt: >
+        ## Phase 7: 最终验证
+
+
+        工作目录: {{input.project_path}}/.worktrees/{{input.branch_name}}
+
+        任务 ID: <init-task 节点返回的 task_id>
+
+
+        ### ⚡ Baseline regression testing protocol（v1.3 铁律）
+
+        本节点使用 baseline set-diff 评估 test/lint/typecheck/build/CLI smoke：
+        - **绝对零失败不是 PASS 条件**；pre-existing failures 不算 regression。
+        - 只看"是否引入 baseline 没有的新稳定失败"。
+        - 支持的 category（5 类）：`"test"` / `"lint"` / `"typecheck"` / `"build"` / `"cli-smoke"`。
+        - 真实功能/安全/代码审查 BLOCKING 问题仍照常阻断；本协议只豁免 pre-existing 测试/lint/类型/build/smoke 噪声。
+        - 本节点**独立运行** modified 重检（不复用 tdd-implement / cli-e2e-test 的结果）以验证前节点结论可信。
+
+        #### 步骤 A — Capture baseline（复用前节点已捕获的 baseline）
+
+        1. 读取 `reports/<task_id>-tdd-baseline.json`（来自 tdd-implement）+ `reports/<task_id>-e2e-{build,test,cli-smoke}-baseline.json`（来自 cli-e2e-test）。
+        2. 任一缺失 → task_operation_create(action_type="problem") → FAIL。
+        3. 校验 schema / task_id / worktree_path / invocation_hash；任一不一致 → FAIL。
+
+        #### 步骤 B — Capture modified（独立重检 modified；不信 tdd-implement 报告）
+
+        1. 跑 capture 脚本（stage=verify + 全部 5 category）独立捕获：
+           ```bash
+           mkdir -p reports/
+           bun scripts/capture-rd-pipeline-baseline.ts \
+             --stage verify \
+             --category test,build,cli-smoke \
+             --task-id <init-task 节点返回的 task_id> \
+             --out reports/<task_id>-verify-modified-failures.json
+           bun scripts/verify-rd-pipeline-baseline.ts \
+             --baseline reports/<task_id>-tdd-baseline.json \
+             --modified reports/<task_id>-verify-modified-failures.json
+           ```
+        2. `new_regressions[category] = diff`，diff = sorted(modified) - sorted(baseline)，三 category 各自算。
+        3. 任一非空 → 8 项 checklist 的 `tests_pass / build_passes / cli_smoke_passes` 标记为 false。
+
+        #### 步骤 C — Fail-Closed Rules（违反任一即 FAIL）
+
+        - baseline.json 缺失 / 损坏 / parse fail → 节点 FAIL（视为未捕获 baseline）。
+        - baseline 与 modified 的 invocation_hash 不一致 → 命令集合漂移 → 节点 FAIL。
+        - modified 缺失 baseline 存在的 category key → 节点 FAIL（捕获不完整）。
+        - capture exit 非零但 modified.failures 为空 → 节点 FAIL（无 stable failure ID）。
+        - 跨 worktree 切换 / capture timeout → 节点 FAIL。
+
+        > 节点专属执行步骤见 `Step 7.3.5: 独立 baseline/modified 重检`（在 Step 7.3 独立验证 之后、Step 7.4 判定 之前执行）。
+
+        ### Step 7.0: 加载 skills（强制）
+
+        - skill("verification-before-completion") — 完成前必须独立运行所有验收命令
+
+
+        ### Step 7.1: 读取所有 task operations
+
+        - task_operation_list(task_id=<task_id>, limit=50)
+
+        - 检查每个验收标准都有对应 progress/milestone/review 记录
+
+
+        ### Step 7.2: 8 项 checklist（必须逐项核查）
+
+        - [ ] **goals-verified** — 任务 goals 全部满足（对照 init-task description）
+
+        - [ ] **plan-doc-verified** — plan 文档每个文件清单都已实现
+
+        - [ ] **evidence-collected** — 有 build/test/review 实际输出作为证据
+
+        - [ ] **no-obvious-issues** — 无 missing imports / 语法错误 / type error
+
+        - [ ] **review-passed** — code-review 节点输出 review_status === "PASS" 且
+        blocking 数组为空
+
+        - [ ] **build-passes** — {{input.build_command}} exit 0
+
+        - [ ] **tests-pass** — {{input.test_command}} 全部通过（pre-existing failures
+        已在 tdd-implement 节点文档化）
+
+        - [ ] **cli-smoke-passes** — CLI 命令可执行且输出预期
+
+
+        ### ⚡ Bun test 提示（统一使用 --parallel=4）
+
+        本项目 `bun test` **统一使用 `--parallel=4` 模式**：
+
+        ```bash
+        bun test <package_path> --parallel=4
+        # 例：bun test packages/core --parallel=4
+        # 例：bun test packages/cli --parallel=4
+        # 例：bun test tests/cli --parallel=4
+        ```
+
+        **📌 关键约束：必须先跑 baseline，再跑修改后**
+
+        1. **跑 baseline（main 分支基线）**：
+           - checkout 到 main 或 `git stash` 暂存所有修改
+           - 跑 `bun test <package_path> --parallel=4`
+           - 记录 baseline 失败列表（fail_test_names）和通过数
+
+        2. **跑修改后测试**：
+           - 恢复你的修改（或重新跑）
+           - 跑 `bun test <package_path> --parallel=4`
+           - 记录修改后失败列表和通过数
+
+        3. **对比判定**：
+           - ✅ PASS：修改后失败列表 == baseline 失败列表（甚至更少）
+           - ❌ FAIL：修改后引入了 baseline 没有的新失败
+
+        **重要原则**：
+        - 只看"是否引入新错误"，不要被 baseline 已有的失败误导
+        - baseline 已存在的失败是已知的，不算 regression
+        - 如果不确定，先跑一次 baseline 确认 pre-existing 失败列表
+
+        ### Step 7.3: 独立验证（不信任 tdd-implement 报告）
+
+        - 在 worktree 内重新跑一次 {{input.test_command}}，确认本节点独立验证通过
+
+        - 跑一次 {{input.build_command}}，确认产物可用
+
+        - 跑一次 {{input.cli_smoke_command}}，确认 CLI 可启动
+
+
+        ### Step 7.3.5: 独立 baseline/modified 重检（v1.3 核心铁律）
+
+        本节点专属执行步骤，对应 v1.3 baseline regression protocol 的 步骤 A → 步骤 B → 步骤 C：
+
+        1. **步骤 A — Capture baseline（复用 tdd-implement / cli-e2e-test 已捕获的 baseline）**：
+           - 读取 `reports/<task_id>-tdd-baseline.json` + `reports/<task_id>-e2e-{build,test,cli-smoke}-baseline.json`。
+           - 任一缺失 → task_operation_create(action_type="problem") → verify_status="FAIL"。
+           - 校验 schema / task_id / worktree_path / invocation_hash；任一不一致 → FAIL。
+
+        2. **步骤 B — Capture modified（独立重检 modified）**：
+           ```bash
+           bun scripts/capture-rd-pipeline-baseline.ts \
+             --stage verify \
+             --category test,build,cli-smoke \
+             --task-id <init-task 节点返回的 task_id> \
+             --out reports/<task_id>-verify-modified-failures.json
+           bun scripts/verify-rd-pipeline-baseline.ts \
+             --baseline reports/<task_id>-tdd-baseline.json \
+             --modified reports/<task_id>-verify-modified-failures.json
+           ```
+           - `new_regressions[category] = diff`，diff = sorted(modified) - sorted(baseline)，三 category 各自算。
+           - 任一非空 → 8 项 checklist 的 `tests_pass / build_passes / cli_smoke_passes` 标记为 false，并 append 到 failed_items。
+
+        3. **步骤 C — Fail-Closed Rules**：严格按上方协议段 `步骤 C` 校验；任一违反 → verify_status="FAIL"，触发 loop back 到 tdd-implement。
+
+        4. `verify_status="PASS"` 仅当 8 项 checklist 全过 + new_regressions 字典全空（test / build / cli-smoke 三个 array 均为 []）。**绝对零失败不是 PASS 条件**；pre-existing failures 可保留。
+
+        ### Step 7.4: 判定
+
+        - 全部 8 项通过 → verify_status = "PASS"，进入 merge-to-main
+
+        - 任一失败 → verify_status = "FAIL"，触发 loop back 到 tdd-implement 节点
+
+        - 同时记录失败原因到 task_operation（action_type=problem）
+
+
+        ### Step 7.5: 记录
+
+        - task_operation_create(
+            action_type="review",
+            action_title="Final verify: <status>",
+            action_description=<8 项 checklist JSON + 失败原因（如果有）>
+          )
+        - task_update(progress=85)
+
+
+        ### Step 7.6: 输出（CRITICAL — 必须调用 workflow_submit_output）
+
+        调用 `workflow_submit_output` 工具提交以下 JSON（**这是触发 loop 机制的关键**）：
+
+        ```json
+
+        {
+          "verify_status": "PASS" | "FAIL",
+          "checklist": {
+            "goals_verified": true/false,
+            "plan_doc_verified": true/false,
+            "evidence_collected": true/false,
+            "no_obvious_issues": true/false,
+            "review_passed": true/false,
+            "build_passes": true/false,
+            "tests_pass": true/false,
+            "cli_smoke_passes": true/false
+          },
+          "failed_items": [<name of failed checklist item>],
+          "evidence": {
+            "build_exit_code": <n>,
+            "test_exit_code": <n>,
+            "cli_smoke_exit_code": <n>
+          }
+        }
+
+        ```
+
+        - `verify_status` 决定下游分支："PASS" → 进入 merge-to-main；"FAIL" → 回环到
+        tdd-implement 重做
+
+        - **不要**用普通文本输出 — workflow engine 只会解析 workflow_submit_output 提交的 JSON
+    depends_on:
+      - cli-e2e-test
+  - id: merge-to-main
+    type: agent
+    name: "Phase 8: Merge to local main (auto_merge 铁律 + 冲突预检 + 验证)"
+    config:
+      agent_type: roy
+      output:
+        mode: json
+        schema:
+          type: object
+          description: Merge 结果 — merge_status 决定 summary-report 内容（merge_status 取值 MERGED | MERGE_SKIPPED | MERGE_FAILED）
+          properties:
+            merge_status:
+              type: string
+              description: '"MERGED" 表示成功合并到 base_branch；"MERGE_SKIPPED" 表示 auto_merge=false
+                跳过；"MERGE_FAILED" 表示执行失败（冲突/构建失败/用户撤销）'
+            merge_reason:
+              type: string
+              description: merge 状态原因（SKIPPED 时是授权提示，FAILED 时是失败原因）
+            merge_commit:
+              type: string
+              description: merge commit hash（仅 MERGED 时有值）
+            base_branch:
+              type: string
+            feature_branch:
+              type: string
+            post_merge_build_ok:
+              type: boolean
+              description: MERGED 时 post-merge build 是否成功
+            post_merge_test_ok:
+              type: boolean
+              description: MERGED 时 post-merge tests 是否成功
+            worktree_path:
+              type: string
+              description: 保留的 worktree 路径（用户最终验收后可清理）
+          required:
+            - merge_status
+            - merge_reason
+            - base_branch
+            - feature_branch
+      prompt: >
+        ## Phase 8: Merge to local main（auto_merge 铁律 + 冲突预检 + 验证）
+
+
+        工作目录: {{input.project_path}}（主 worktree，**不是** feature worktree）
+
+        任务 ID: <init-task 节点返回的 task_id>
+
+        基础分支: {{input.base_branch}}
+
+        特性分支: {{input.task_type}}/{{input.branch_name}}
+
+        auto_merge: {{input.auto_merge}}
+
+        worktree 路径: {{input.project_path}}/.worktrees/{{input.branch_name}}
+
+
+        ### ⚠️ 铁律
+
+        1. **auto_merge 必须显式为 "true" 才执行** — 默认 "false" → MERGE_SKIPPED
+        2. **必须在主 worktree 内执行**，不能在 feature worktree 内执行
+        3. **冲突时自动 rebase 到最新 base_branch**（保留 main 已有逻辑优先）
+        4. **merge 后必须跑 build + tests 验证 main 未被破坏**，否则回滚
+        5. **worktree 保留**（不清理），等用户最终验收
+
+
+        ### Step 8.1: 判断是否执行 merge
+
+        - 调用 bash 工具检查 `{{input.auto_merge}}`：
+          - **不等于 "true"** → merge_status = "MERGE_SKIPPED"，
+            merge_reason = "auto_merge='{{input.auto_merge}}' (需要用户显式授权为 'true')"
+            → 跳到 Step 8.6 直接输出
+          - **等于 "true"** → 继续执行以下步骤
+
+
+        ### Step 8.2: 工作目录校验
+
+        - 用 bash 工具运行 `git rev-parse --show-toplevel`，确认不在 feature worktree 内
+
+        - 如果在 feature worktree 内 → merge_status = "MERGE_FAILED"，merge_reason = "WORKTREE_ERROR"
+          → 跳到 Step 8.6
+
+
+        ### Step 8.3: Checkout base_branch + 拉取最新
+
+        - `git checkout {{input.base_branch}}`
+
+        - `git pull --ff-only`（如果离线则跳过）
+
+
+        ### Step 8.4: 冲突预检（git merge-tree）
+
+        - `MERGE_BASE=$(git merge-base {{input.base_branch}} {{input.task_type}}/{{input.branch_name}})`
+
+        - `git merge-tree $MERGE_BASE {{input.base_branch}} {{input.task_type}}/{{input.branch_name}} | grep "<<<<<<<"`
+          判断是否有冲突
+
+        - **有冲突** → 自动 rebase：
+          1. `git checkout {{input.task_type}}/{{input.branch_name}}`
+          2. `git rebase {{input.base_branch}}`
+          3. rebase 失败 → `git rebase --abort` + merge_status = "MERGE_FAILED"，merge_reason = "REBASE_FAILED"
+          4. rebase 成功 → `git checkout {{input.base_branch}}` 后继续
+
+        - **无冲突** → 直接进入 Step 8.5
+
+
+        ### Step 8.5: 执行 merge + post-merge 验证
+
+        - `git merge --no-ff {{input.task_type}}/{{input.branch_name}} -m "Merge {{input.task_type}}/{{input.branch_name}} into {{input.base_branch}}"`
+
+        - 跑 `{{input.build_command}}`，exit != 0 → merge_status = "MERGE_FAILED"，merge_reason = "POST_MERGE_BUILD_FAILED"
+
+        - 跑 `{{input.test_command}}`，exit != 0 → merge_status = "MERGE_FAILED"，merge_reason = "POST_MERGE_TEST_FAILED"
+
+        - 全部成功 → merge_status = "MERGED"，merge_commit = `git rev-parse HEAD`
+
+
+        ### Step 8.6: 输出（CRITICAL — 必须调用 workflow_submit_output）
+
+        调用 `workflow_submit_output` 工具提交以下 JSON（**这是 summary-report 节点读取状态的关键**）：
+
+        ```json
+
+        {
+          "merge_status": "MERGED" | "MERGE_SKIPPED" | "MERGE_FAILED",
+          "merge_reason": "<reason>",
+          "merge_commit": "<commit hash | 空字符串>",
+          "base_branch": "{{input.base_branch}}",
+          "feature_branch": "{{input.task_type}}/{{input.branch_name}}",
+          "post_merge_build_ok": <boolean>,
+          "post_merge_test_ok": <boolean>,
+          "worktree_path": "{{input.project_path}}/.worktrees/{{input.branch_name}}"
+        }
+
+        ```
+
+        - **不要**用普通文本输出 — workflow engine 只会解析 workflow_submit_output 提交的 JSON
+
+
+        ### Step 8.7: 记录
+
+        - task_operation_create(
+            action_type="milestone",
+            action_title="Merge: <merge_status>",
+            action_description=<完整 JSON + merge_commit / fail 原因>
+          )
+        - task_update(progress=95)
+    depends_on:
+      - final-verify
+  - id: summary-report
+    type: agent
+    name: "Phase 9: 构建总结报告 + 任务闭环"
+    config:
+      agent_type: roy
+      output:
+        mode: json
+        schema:
+          type: object
+          description: 总结报告结果 — workflow 终态
+          properties:
+            summary_report_path:
+              type: string
+            task_completed:
+              type: boolean
+            task_progress:
+              type: integer
+            merge_status:
+              type: string
+              description: '"MERGED" / "READY_FOR_MERGE" / "FAILED" — 给外部系统读'
+            next_step:
+              type: string
+          required:
+            - summary_report_path
+            - task_completed
+            - merge_status
+            - next_step
+      prompt: >
+        ## Phase 9: 构建总结报告 + 任务闭环
+
+
+        任务 ID: <init-task 节点返回的 task_id>
+
+        报告输出: {{input.report_dir}}<task_id>-rd-summary.md
+
+
+        ### Step 9.1: 收集所有阶段产物
+
+        - 读取 task_operation_list(task_id=<task_id>, limit=50) 获取完整执行轨迹
+
+        - 读取 plan 节点产出的 plan_doc 路径
+
+        - 读取 tdd-implement 节点的 files_modified / commits / test_count
+
+        - 读取 code-review 节点的 review JSON（severity 分布）
+
+        - 读取 final-verify 节点的 checklist 结果
+
+        - 读取 merge-to-main 节点的 stdout（MERGE_OK 或 MERGE_SKIPPED）
+
+
+        ### Step 9.2: 生成 markdown 报告
+
+
+        在 worktree 内执行 `mkdir -p {{input.report_dir}}`，然后写入
+        `<task_id>-rd-summary.md`。
+
+
+        报告必须包含以下小节（agent 根据阶段产物填充实际内容）：
+
+
+        - `## 任务概览`：标题 / 类型 / 优先级 / 分支 / 基础分支 / Worktree / 任务链接
+
+        - `## 执行轨迹（9 个阶段）`：每个阶段一段，包含该阶段的 op 记录与状态
+            - Phase 1: 任务管理（相似任务参考、Tags）
+            - Phase 2: Worktree 隔离（路径 / 分支 / 状态）
+            - Phase 3: Plan（设计文档路径 / 预计涉及文件 / 预计测试数）
+            - Phase 4: TDD 循环（RED/GREEN/REFACTOR / 测试结果 / Commits）
+            - Phase 5: Code Review（status / severity 分布 / 建议）
+            - Phase 6: CLI E2E（Build / Tests / CLI Smoke 三个 PASS/FAIL）
+            - Phase 7: 最终验证（status / 8 项 checklist 逐项打勾或叉）
+            - Phase 8: Merge 状态 — 根据 auto_merge 实际值选择：
+                - 如果 auto_merge 是 "true" 且 merge-to-main 节点输出包含 "MERGE_OK"：
+                  写 "已合并到 {{input.base_branch}} (commit: <hash>)" 并附带 post-merge build/tests 结果
+                - 否则：写 "未合并（auto_merge={{input.auto_merge}}，需用户授权），分支已就绪: {{input.task_type}}/{{input.branch_name}}"
+            - Phase 9: 总结报告（报告路径 / 任务状态）
+        - `## 改动文件清单`：执行 `git diff {{input.base_branch}}...HEAD --stat` 抓取输出嵌入
+
+        - `## 关键代码片段`：1-2 个最重要的改动（附 commit hash）
+
+        - `## 遗留事项 / 风险`：未解决的问题 / 已知限制 / pre-existing failures 列表
+
+        - `## 下一步建议`：例如用户审查 worktree 后可合并到 main / 建议拆分多个 PR / 建议补充集成测试
+
+
+        报告必须以一级标题 `# R&D Task #<task_id> Summary Report` 开头，并标注 "Generated by
+        roy-rd-pipeline v1.2"。
+
+
+        ### Step 9.3: 任务闭环
+
+        - task_operation_create(
+            action_type="completed",
+            action_title="R&D pipeline complete",
+            action_description="Summary report: <report_path>"
+          )
+        - task_update(progress=100)
+
+        - task_complete()
+
+
+        ### Step 9.4: 飞书通知（可选，如果用户在飞书可达）
+
+        如果用户提供了 lark 上下文，可调用 lark-cli 发送总结消息到用户对话
+
+        （参考 Task #1993 的做法 — 完整根因报告 + 分支就绪提示）
+
+
+        ### Step 9.5: 输出（CRITICAL — 必须调用 workflow_submit_output）
+
+        调用 `workflow_submit_output` 工具提交以下 JSON（**workflow engine 只会解析 workflow_submit_output 提交的 JSON**）：
+
+        ```json
+
+        {
+          "summary_report_path": "{{input.report_dir}}<task_id>-rd-summary.md",
+          "task_completed": true,
+          "task_progress": 100,
+          "merge_status": "MERGED" | "READY_FOR_MERGE" | "FAILED",
+          "next_step": "<用户下一步操作建议>"
+        }
+
+        ```
+
+        - **不要**用普通文本输出
+    depends_on:
+      - merge-to-main
+entry: init-task
+outputs: []
+inputs:
+  task_type:
+    type: string
+    description: 任务类型 — feature | bug | refactor
+    required: true
+  task_title:
+    type: string
+    description: 任务标题（将作为 task_create 的 title）
+    required: true
+  task_description:
+    type: string
+    description: 任务详细描述（背景、验收标准、复现步骤等）
+    required: true
+  task_priority:
+    type: string
+    description: 任务优先级 — low | medium | high
+    default: medium
+    required: false
+  task_tags:
+    type: string
+    description: 额外标签（逗号分隔），会与 task_type、rd-pipeline 合并
+    default: ""
+    required: false
+  project_path:
+    type: string
+    description: 项目根路径
+    default: ~/work/codework/personal/roy_world/roy-bot
+    required: false
+  base_branch:
+    type: string
+    description: 基础分支（worktree 将基于此创建新分支）
+    default: main
+    required: false
+  branch_name:
+    type: string
+    description: 分支名（不含 type 前缀，如 plugin-emit-notification）
+    required: true
+  test_command:
+    type: string
+    description: 单元测试命令
+    default: cd packages/core && bun test && cd ../cli && bun test
+    required: false
+  build_command:
+    type: string
+    description: 构建命令
+    default: bun run build:cli:dev:single
+    required: false
+  cli_smoke_command:
+    type: string
+    description: CLI smoke 测试命令
+    default: bun packages/cli/dist/bin/roy-bot.js --help
+    required: false
+  auto_merge:
+    type: string
+    description: |
+      ⚠️ 铁律：仅当用户显式授权为 "true" 时才合并到 main。
+      默认 "false" — 跳过 merge，输出 MERGE_SKIPPED 等待用户授权。
+    default: "false"
+    required: false
+  report_dir:
+    type: string
+    description: 总结报告输出目录（相对 project_path）
+    default: reports/
+    required: false
+metadata:
+  tags: []
+edges:
+  - from: init-task
+    to: setup-worktree
+  - from: setup-worktree
+    to: plan
+  - from: plan
+    to: tdd-implement
+  - from: merge-to-main
+    to: summary-report
+  - from: tdd-implement
+    to: code-review
+    when: "{{nodes.tdd-implement.tdd_status}} == 'PASS'"
+  - from: code-review
+    to: cli-e2e-test
+    when: "{{nodes.code-review.review_status}} == 'PASS'"
+  - from: cli-e2e-test
+    to: final-verify
+    when: "{{nodes.cli-e2e-test.cli_e2e_status}} == 'PASS'"
+  - from: final-verify
+    to: merge-to-main
+    when: "{{nodes.final-verify.verify_status}} == 'PASS'"
+  - from: tdd-implement
+    to: tdd-implement
+    when: "{{nodes.tdd-implement.tdd_status}} == 'FAIL'"
+  - from: code-review
+    to: tdd-implement
+    when: "{{nodes.code-review.review_status}} == 'NEEDS_FIX'"
+  - from: cli-e2e-test
+    to: tdd-implement
+    when: "{{nodes.cli-e2e-test.cli_e2e_status}} == 'FAIL'"
+  - from: final-verify
+    to: tdd-implement
+    when: "{{nodes.final-verify.verify_status}} == 'FAIL'"
+

@@ -1,0 +1,122 @@
+# Nested Workflow Composition
+#
+# Demonstrates nested workflow patterns:
+# - Multiple levels of nested workflow calls
+# - Parallel execution at each level
+# - Complex dependency chains across nested boundaries
+#
+# Diagram:
+#
+#   start
+#    ├── sub-workflow-1 ──┬─→ level-2-a ──┐
+#    │                  ├─→ level-2-b ──┼─→ merge-2 → level-3 → final-nested
+#    └── sub-workflow-2 ──┴─→ level-2-c ──┘
+
+name: nested-workflow-composition
+version: "1.0"
+description: Nested workflow composition with multiple levels of abstraction
+
+metadata:
+  author: Roy Agent
+  tags:
+    - nested
+    - hierarchy
+    - composition
+
+nodes:
+  # ========== Entry ==========
+  - id: start
+    type: tool
+    name: Start
+    config:
+      tool: echo
+      message: "Starting nested workflow"
+    depends_on: []
+
+  # ========== First Level Nested ==========
+  - id: sub-workflow-1
+    type: workflow
+    name: Sub-Workflow A
+    config:
+      workflow_name: sub-workflow-a
+    depends_on:
+      - start
+
+  - id: sub-workflow-2
+    type: workflow
+    name: Sub-Workflow B
+    config:
+      workflow_name: sub-workflow-b
+    depends_on:
+      - start
+
+  # ========== Second Level - Parallel Execution ==========
+  - id: level-2-a
+    type: tool
+    name: Level 2 Task A
+    config:
+      tool: validator
+      operation: validate-a
+    depends_on:
+      - sub-workflow-1
+
+  - id: level-2-b
+    type: tool
+    name: Level 2 Task B
+    config:
+      tool: validator
+      operation: validate-b
+    depends_on:
+      - sub-workflow-1
+
+  - id: level-2-c
+    type: tool
+    name: Level 2 Task C
+    config:
+      tool: validator
+      operation: validate-c
+    depends_on:
+      - sub-workflow-2
+
+  # ========== Merge Point ==========
+  - id: merge-2
+    type: merge
+    name: Merge Level 2
+    config:
+      strategy: collect
+    depends_on:
+      - level-2-a
+      - level-2-b
+      - level-2-c
+
+  # ========== Third Level ==========
+  - id: level-3
+    type: tool
+    name: Level 3 Processing
+    config:
+      tool: calculator
+      operation: aggregate
+    depends_on:
+      - merge-2
+
+  # ========== Final Nested Call ==========
+  - id: final-nested
+    type: workflow
+    name: Final Nested Workflow
+    config:
+      workflow_name: final-workflow
+    depends_on:
+      - level-3
+
+outputs:
+  - name: level_2_results
+    source: merge-2
+    path: inputs
+
+  - name: level_3_result
+    source: level-3
+    path: result
+
+  - name: final_nested_result
+    source: final-nested
+    path: result

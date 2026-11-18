@@ -1,0 +1,779 @@
+name: code-review-v3
+version: "3.0"
+description: |
+  Code review workflow v3 — multi-dimensional parallel review with structured JSON output.
+
+  Five domain-expert agents (security, performance, testability, maintainability, architecture)
+  run in parallel after a pre-check, each emitting a schema-validated JSON review.
+  A meta-reviewer agent aggregates their findings into a final report with overall score,
+  verdict (approve / request_changes / comment), severity counts, top issues, and a
+  full markdown report.
+
+  INPUT: {
+    "repo_path":          "string  — absolute path to the git repo (default: current working directory).",
+    "base_ref":           "string  — review commits in `<base_ref>..HEAD` (e.g. 'main', 'origin/main').",
+    "commits":            "string  — space-separated commit refs (overridden by base_ref).",
+    "dimensions":         "string  — comma-separated subset of {security, performance, testability, maintainability, architecture}. Default: all 5.",
+    "severity_threshold": "string  — minimum severity to include findings in the final report: 'critical' | 'important' (default) | 'minor' | 'suggestion'."
+  }
+
+  FLOW:
+    pre-check → 5 parallel experts → meta-reviewer → output-result → end
+
+  UPGRADES OVER v2.5:
+    - 5 domain experts run in parallel (parallel_limit = 5).
+    - Every expert returns a schema-validated JSON object (dimension/score/findings/summary).
+    - Meta-reviewer aggregates to a final JSON (overall_score, verdict, severity counts,
+      top issues, executive_summary, full_report_markdown).
+    - Weighted scoring across dimensions (configurable weights, sensible defaults).
+    - 4 severity levels: critical / important / minor / suggestion.
+
+entry: pre-check
+
+config:
+  parallel_limit: 5
+  timeout: 900000
+  maxIterations: 100
+  loopEnabled: false
+
+nodes:
+  # ===========================================================
+  # 1. Pre-check: resolve commits & print context
+  # ===========================================================
+  - id: pre-check
+    type: tool
+    name: "Pre-Check: Resolve Commits & Diff Stats"
+    config:
+      tool: bash
+      command: |
+        set -euo pipefail
+
+        REPO_PATH="{{input.repo_path}}"
+        if [ -z "$REPO_PATH" ]; then REPO_PATH="$(pwd)"; fi
+
+        echo "[code-review-v3 / pre-check]"
+        echo "repo_path          = $REPO_PATH"
+        echo "base_ref           = {{input.base_ref}}"
+        echo "commits            = {{input.commits}}"
+        echo "dimensions         = {{input.dimensions}}"
+        echo "severity_threshold = {{input.severity_threshold}}"
+        echo
+
+        if ! git -C "$REPO_PATH" rev-parse --git-dir > /dev/null 2>&1; then
+          echo "ERROR: $REPO_PATH is not a git repository" >&2
+          exit 1
+        fi
+        echo "✓ git repository: $(git -C "$REPO_PATH" rev-parse --show-toplevel)"
+
+        cd "$REPO_PATH"
+        if [ -n "{{input.base_ref}}" ]; then
+          COMMITS=$(git log --reverse --format="%H" "{{input.base_ref}}..HEAD" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')
+          echo "✓ resolved from base_ref={{input.base_ref}}..HEAD"
+        elif [ -n "{{input.commits}}" ]; then
+          COMMITS="{{input.commits}}"
+          echo "✓ using provided commits"
+        else
+          COMMITS=$(git log --reverse --format="%H" HEAD~3..HEAD 2>/dev/null | tr '\n' ' ' | sed 's/ $//')
+          echo "✓ defaulting to HEAD~3..HEAD"
+        fi
+
+        if [ -z "$COMMITS" ]; then
+          echo "ERROR: no commits resolved" >&2
+          exit 1
+        fi
+
+        echo
+        echo "--- commit log (oldest → newest) ---"
+        echo "$COMMITS" | tr ' ' '\n' | tac | xargs -I{} git log -1 --format="%h %an %ad %s" --date=short {}
+
+        echo
+        echo "--- diff stats (concatenated) ---"
+        echo "$COMMITS" | tr ' ' '\n' | tac | xargs -I{} git show --stat --format="=== %h %s ===" {} | head -300
+
+        echo
+        echo "RESOLVED_COMMITS=$COMMITS"
+    depends_on: []
+
+  # ===========================================================
+  # 2a. Security Expert
+  # ===========================================================
+  - id: security-expert
+    type: agent
+    name: "Security Expert"
+    config:
+      agent_type: general
+      maxIterations: 10
+      options:
+        allowedTools:
+          - bash
+          - read_file
+          - glob
+          - grep
+          - echo
+          - write_file
+      output:
+        mode: json
+        schema:
+          type: object
+          properties:
+            dimension:
+              type: string
+              description: "Always 'security' for this expert."
+            score:
+              type: number
+              description: "0-100, where 100 means no security concerns found."
+            findings:
+              type: array
+              items:
+                type: object
+                properties:
+                  severity:
+                    type: string
+                    description: "One of critical|important|minor|suggestion."
+                  file:
+                    type: string
+                    description: "Path to the file (relative to repo root)."
+                  line_range:
+                    type: string
+                    description: "Line range, e.g. 'L10-L25' or 'L42'."
+                  title:
+                    type: string
+                    description: "Short one-line title of the finding."
+                  description:
+                    type: string
+                    description: "Detailed explanation of the issue."
+                  suggestion:
+                    type: string
+                    description: "Concrete remediation suggestion."
+                required:
+                  - severity
+                  - file
+                  - title
+                  - description
+            summary:
+              type: string
+              description: "1-2 sentence summary of the security review."
+          required:
+            - dimension
+            - score
+            - findings
+            - summary
+      prompt: |
+        You are a SECURITY expert reviewing recent code changes.
+
+        ## Inputs
+        - Repository path: {{input.repo_path}} (default: cwd)
+        - Resolved commits (from pre-check, format: <sha1> <sha2> ...): see below.
+        - Severity threshold: {{input.severity_threshold}} (default: 'important')
+
+        ## Pre-check output
+        {{nodes.pre-check.output}}
+
+        ## Operating procedure
+        1. From the pre-check output, extract the RESOLVED_COMMITS line and the commit log.
+        2. For each commit (oldest → newest), run `git show --stat <sha>` and then
+           `git show <sha>` to view the full diff.
+        3. Use `read_file` / `grep` for additional context when the diff is large.
+        4. Focus on SECURITY concerns:
+           - Injection: SQL/NoSQL/Command/LDAP/XPath/template injection
+           - Sensitive data leakage (logs, errors, headers, URL params)
+           - AuthN / AuthZ flaws (missing checks, role bypass, JWT issues)
+           - Crypto misuses (weak algos, hardcoded keys, IV reuse, ECB mode)
+           - Insecure deserialization, unsafe eval, prototype pollution
+           - SSRF, path traversal, open redirect, CORS/CSRF
+           - Dependency / supply-chain issues (suspicious new deps)
+           - Secret leakage in code/config (API keys, tokens, passwords)
+        5. Severity grading (replace v2's emoji markers):
+           - critical:   exploitable now, leads to RCE / data breach / auth bypass
+           - important: clear vulnerability, needs fix before merge
+           - minor:      defense-in-depth gap or hardening opportunity
+           - suggestion: stylistic / future-proofing
+        6. If nothing concerning is found, return findings: [] and score near 100.
+        7. Apply the severity_threshold by OMITTING findings below that level.
+        8. Call workflow_submit_output with the final JSON object. Do NOT add prose.
+    depends_on:
+      - pre-check
+
+  # ===========================================================
+  # 2b. Performance Expert
+  # ===========================================================
+  - id: performance-expert
+    type: agent
+    name: "Performance Expert"
+    config:
+      agent_type: general
+      maxIterations: 10
+      options:
+        allowedTools:
+          - bash
+          - read_file
+          - glob
+          - grep
+          - echo
+          - write_file
+      output:
+        mode: json
+        schema:
+          type: object
+          properties:
+            dimension:
+              type: string
+            score:
+              type: number
+            findings:
+              type: array
+              items:
+                type: object
+                properties:
+                  severity: {type: string}
+                  file: {type: string}
+                  line_range: {type: string}
+                  title: {type: string}
+                  description: {type: string}
+                  suggestion: {type: string}
+                required:
+                  - severity
+                  - file
+                  - title
+                  - description
+            summary:
+              type: string
+          required:
+            - dimension
+            - score
+            - findings
+            - summary
+      prompt: |
+        You are a PERFORMANCE expert reviewing recent code changes.
+
+        ## Inputs
+        - Repository path: {{input.repo_path}} (default: cwd)
+        - Resolved commits: see pre-check output below.
+        - Severity threshold: {{input.severity_threshold}} (default: 'important')
+
+        ## Pre-check output
+        {{nodes.pre-check.output}}
+
+        ## Operating procedure
+        1. Extract RESOLVED_COMMITS from the pre-check output.
+        2. For each commit, run `git show <sha>` and inspect.
+        3. Use `read_file` / `grep` for context.
+        4. Focus on PERFORMANCE concerns:
+           - Algorithmic complexity (O(n²) hot paths, nested loops over large data)
+           - N+1 query patterns (ORM misuse, missing eager loading, per-row fetch)
+           - Missing or wrongly used caches (no cache, stale cache, cache stampede)
+           - Concurrency issues (race conditions, missing locks, deadlock potential)
+           - Inefficient I/O (sync I/O in hot path, large files read whole, no streaming)
+           - Memory bloat (unbounded collections, leak risks, large object retention)
+           - Hot-path regex / JSON.parse on user input without limits
+           - Bundle / binary size regressions in newly added code
+        5. Severity grading:
+           - critical:   will cause production outage or 10x+ regression
+           - important: clear performance bug worth fixing pre-merge
+           - minor:      small inefficiency, defense-in-depth
+           - suggestion: future optimization
+        6. If no concerns, return findings: [] and score near 100.
+        7. Apply the severity_threshold by OMITTING findings below that level.
+        8. Call workflow_submit_output with the final JSON.
+    depends_on:
+      - pre-check
+
+  # ===========================================================
+  # 2c. Testability Expert
+  # ===========================================================
+  - id: testability-expert
+    type: agent
+    name: "Testability Expert"
+    config:
+      agent_type: general
+      maxIterations: 10
+      options:
+        allowedTools:
+          - bash
+          - read_file
+          - glob
+          - grep
+          - echo
+          - write_file
+      output:
+        mode: json
+        schema:
+          type: object
+          properties:
+            dimension: {type: string}
+            score: {type: number}
+            findings:
+              type: array
+              items:
+                type: object
+                properties:
+                  severity: {type: string}
+                  file: {type: string}
+                  line_range: {type: string}
+                  title: {type: string}
+                  description: {type: string}
+                  suggestion: {type: string}
+                required:
+                  - severity
+                  - file
+                  - title
+                  - description
+            summary: {type: string}
+          required:
+            - dimension
+            - score
+            - findings
+            - summary
+      prompt: |
+        You are a TESTABILITY expert reviewing recent code changes.
+
+        ## Inputs
+        - Repository path: {{input.repo_path}} (default: cwd)
+        - Resolved commits: see pre-check output below.
+        - Severity threshold: {{input.severity_threshold}} (default: 'important')
+
+        ## Pre-check output
+        {{nodes.pre-check.output}}
+
+        ## Operating procedure
+        1. Extract RESOLVED_COMMITS from the pre-check output.
+        2. For each commit, run `git show <sha>` and inspect the diff.
+        3. Use `read_file` / `grep` to evaluate existing test coverage.
+        4. Focus on TESTABILITY concerns:
+           - New logic in non-test files with NO accompanying test changes
+           - Coverage gaps on edge cases (empty input, null, max values, error paths)
+           - Brittle tests (hard-coded time, random seed, network/filesystem deps)
+           - Poor assertions (assertExists on huge objects, no negative cases)
+           - Test code quality (duplication, missing fixtures, leaked state between tests)
+           - Untestable patterns: hidden globals, untestable singletons, side effects at import
+           - Mock overuse that masks real bugs (e.g. mocking the system under test)
+        5. Severity grading:
+           - critical:   new core logic has zero tests, would silently break in prod
+           - important: missing edge-case tests for important branches
+           - minor:      test naming / structure / fixture quality issues
+           - suggestion: nice-to-have (parametrize, add property tests)
+        6. If everything is well-tested, return findings: [] and score near 100.
+        7. Apply severity_threshold by OMITTING findings below that level.
+        8. Call workflow_submit_output with the final JSON.
+    depends_on:
+      - pre-check
+
+  # ===========================================================
+  # 2d. Maintainability Expert
+  # ===========================================================
+  - id: maintainability-expert
+    type: agent
+    name: "Maintainability Expert"
+    config:
+      agent_type: general
+      maxIterations: 10
+      options:
+        allowedTools:
+          - bash
+          - read_file
+          - glob
+          - grep
+          - echo
+          - write_file
+      output:
+        mode: json
+        schema:
+          type: object
+          properties:
+            dimension: {type: string}
+            score: {type: number}
+            findings:
+              type: array
+              items:
+                type: object
+                properties:
+                  severity: {type: string}
+                  file: {type: string}
+                  line_range: {type: string}
+                  title: {type: string}
+                  description: {type: string}
+                  suggestion: {type: string}
+                required:
+                  - severity
+                  - file
+                  - title
+                  - description
+            summary: {type: string}
+          required:
+            - dimension
+            - score
+            - findings
+            - summary
+      prompt: |
+        You are a MAINTAINABILITY expert reviewing recent code changes.
+
+        ## Inputs
+        - Repository path: {{input.repo_path}} (default: cwd)
+        - Resolved commits: see pre-check output below.
+        - Severity threshold: {{input.severity_threshold}} (default: 'important')
+
+        ## Pre-check output
+        {{nodes.pre-check.output}}
+
+        ## Operating procedure
+        1. Extract RESOLVED_COMMITS from the pre-check output.
+        2. For each commit, run `git show <sha>` and inspect.
+        3. Focus on MAINTAINABILITY concerns:
+           - Naming: vague names (data, handle, foo, tmp), misleading names
+           - Complexity: high cyclomatic complexity, deep nesting, long functions (>100 LOC)
+           - Duplicated code blocks (copy-pasted logic across files/commits)
+           - Documentation: missing JSDoc / docstring on public APIs, outdated comments
+           - Error handling: swallowed errors, broad `catch {}`, unclear error messages
+           - Magic numbers / strings, no constants
+           - Dead code (unreachable branches, commented-out blocks, unused exports)
+           - Logging hygiene: console.log leaking through, no log levels
+        4. Severity grading:
+           - critical:   code is actively misleading or unmaintainable (dead code blocking refactor, broken error handling causing silent data loss)
+           - important: clear maintainability hazard worth fixing
+           - minor:      naming / style / small complexity
+           - suggestion: nice-to-have refactor
+        5. If everything is clean, return findings: [] and score near 100.
+        6. Apply severity_threshold by OMITTING findings below that level.
+        7. Call workflow_submit_output with the final JSON.
+    depends_on:
+      - pre-check
+
+  # ===========================================================
+  # 2e. Architecture Expert
+  # ===========================================================
+  - id: architecture-expert
+    type: agent
+    name: "Architecture Expert"
+    config:
+      agent_type: general
+      maxIterations: 10
+      options:
+        allowedTools:
+          - bash
+          - read_file
+          - glob
+          - grep
+          - echo
+          - write_file
+      output:
+        mode: json
+        schema:
+          type: object
+          properties:
+            dimension: {type: string}
+            score: {type: number}
+            findings:
+              type: array
+              items:
+                type: object
+                properties:
+                  severity: {type: string}
+                  file: {type: string}
+                  line_range: {type: string}
+                  title: {type: string}
+                  description: {type: string}
+                  suggestion: {type: string}
+                required:
+                  - severity
+                  - file
+                  - title
+                  - description
+            summary: {type: string}
+          required:
+            - dimension
+            - score
+            - findings
+            - summary
+      prompt: |
+        You are an ARCHITECTURE expert reviewing recent code changes.
+
+        ## Inputs
+        - Repository path: {{input.repo_path}} (default: cwd)
+        - Resolved commits: see pre-check output below.
+        - Severity threshold: {{input.severity_threshold}} (default: 'important')
+
+        ## Pre-check output
+        {{nodes.pre-check.output}}
+
+        ## Operating procedure
+        1. Extract RESOLVED_COMMITS from the pre-check output.
+        2. For each commit, run `git show <sha>` and inspect the diff.
+        3. Use `read_file` / `grep` to assess the surrounding module structure.
+        4. Focus on ARCHITECTURE concerns:
+           - Coupling: new code that breaks module boundaries, leaks abstractions
+           - Dependency direction: lower layers depending on higher layers
+           - Circular dependencies newly introduced
+           - Inappropriate intimacy: reaching into another module's internals
+           - Missing or broken abstraction layer (e.g. raw SQL leaking into business logic)
+           - Design pattern misuse: applying patterns that don't fit, missing obvious patterns
+           - API contract changes: signature drift, breaking public interfaces without deprecation
+           - God-object / god-module growth
+        4. Severity grading:
+           - critical:   introduces a cycle / breaks a clear boundary / corrupts the layering
+           - important: structural smell that will hurt future change velocity
+           - minor:      soft boundary drift
+           - suggestion: future architectural improvement
+        5. If clean, return findings: [] and score near 100.
+        6. Apply severity_threshold by OMITTING findings below that level.
+        7. Call workflow_submit_output with the final JSON.
+    depends_on:
+      - pre-check
+
+  # ===========================================================
+  # 3. Meta-reviewer: aggregate all expert outputs
+  # ===========================================================
+  - id: meta-reviewer
+    type: agent
+    name: "Meta-Reviewer: Aggregate Expert Verdicts"
+    config:
+      agent_type: general
+      maxIterations: 5
+      options:
+        allowedTools:
+          - bash
+          - read_file
+          - glob
+          - grep
+          - echo
+          - write_file
+      output:
+        mode: json
+        schema:
+          type: object
+          properties:
+            overall_score:
+              type: number
+              description: "Weighted average of all dimension scores (0-100)."
+            verdict:
+              type: string
+              description: "One of approve | request_changes | comment."
+            dimension_scores:
+              type: object
+              description: "Mapping of dimension name → score (0-100)."
+            critical_count:
+              type: number
+              description: "Total number of critical findings across all experts."
+            important_count:
+              type: number
+              description: "Total number of important findings across all experts."
+            minor_count:
+              type: number
+              description: "Total number of minor findings across all experts."
+            suggestion_count:
+              type: number
+              description: "Total number of suggestion findings across all experts."
+            top_issues:
+              type: array
+              items:
+                type: object
+                description: "A single top issue item."
+              description: "Top 5 most important findings (critical first, then important)."
+            executive_summary:
+              type: string
+              description: "3-5 sentence human-readable summary."
+            full_report_markdown:
+              type: string
+              description: "Complete markdown report aggregating all experts."
+          required:
+            - overall_score
+            - verdict
+            - dimension_scores
+            - critical_count
+            - important_count
+            - minor_count
+            - suggestion_count
+            - top_issues
+            - executive_summary
+            - full_report_markdown
+      prompt: |
+        You are the META-REVIEWER. You aggregate the five expert reviews into a final
+        structured report. Do NOT perform new code inspection — work strictly from the
+        expert JSON outputs below.
+
+        ## Inputs
+        - Severity threshold: {{input.severity_threshold}} (default: 'important')
+          Findings below this level have already been filtered by each expert.
+
+        ## Expert outputs
+
+        ### security-expert
+        {{nodes.security-expert.result}}
+
+        ### performance-expert
+        {{nodes.performance-expert.result}}
+
+        ### testability-expert
+        {{nodes.testability-expert.result}}
+
+        ### maintainability-expert
+        {{nodes.maintainability-expert.result}}
+
+        ### architecture-expert
+        {{nodes.architecture-expert.result}}
+
+        ## Operating procedure
+
+        1. Parse each expert's JSON. They share this shape:
+           { dimension, score (0-100), findings: [{severity, file, line_range, title, description, suggestion}], summary }
+
+        2. Compute dimension_scores = { security: <score>, performance: <score>, testability: <score>, maintainability: <score>, architecture: <score> }.
+
+        3. Compute weighted overall_score using these default weights (sum = 1.0):
+           - security:        0.30
+           - performance:     0.20
+           - testability:     0.20
+           - maintainability: 0.15
+           - architecture:    0.15
+           Round to 1 decimal.
+
+        4. Count findings by severity across all experts:
+           critical_count, important_count, minor_count, suggestion_count.
+
+        5. Build top_issues: the 5 most impactful findings, sorted by severity
+           (critical > important > minor > suggestion), then by dimension priority
+           (security > performance > testability > maintainability > architecture).
+           Each top issue should be a flat object like:
+             { dimension, severity, file, line_range, title, suggestion }
+
+        6. Compute verdict:
+           - 'request_changes' if critical_count > 0 OR important_count > 0
+           - 'comment'        if minor_count > 0 OR suggestion_count > 0 (and no critical/important)
+           - 'approve'        if all dimensions score >= 95 AND zero findings
+
+        7. Write executive_summary: 3-5 sentences for a human reviewer, covering
+           scope, overall quality, biggest concerns, and a recommendation.
+
+        8. Build full_report_markdown: a complete markdown report with these sections
+           in order (use '#' for h1, '##' for h2, '###' for h3):
+
+           # Code Review Report (v3 — multi-dimensional)
+
+           > Reviewed: <commit count> commits
+           > Severity threshold: <threshold>
+           > Overall score: <overall_score>/100
+           > Verdict: <verdict>
+
+           ## Executive Summary
+           <executive_summary>
+
+           ## Dimension Scores
+           | Dimension       | Score | Findings |
+           |-----------------|-------|----------|
+           | Security        | XX    | X crit / X imp / X min / X sug |
+           | Performance     | XX    | ... |
+           | Testability     | XX    | ... |
+           | Maintainability | XX    | ... |
+           | Architecture    | XX    | ... |
+
+           ## Top Issues
+           1. **[<severity>] <title>** (`<file>:<line_range>`) — <one-line description>
+              Suggestion: <suggestion>
+           2. ...
+
+           ## Per-Dimension Detail
+
+           ### Security (<score>/100)
+           <expert summary>
+           - [critical] <file>:<line_range> — <title> → <suggestion>
+           - ...
+
+           ### Performance (<score>/100)
+           ...
+
+           (Repeat for each of the 5 dimensions. If a dimension has zero findings, print "No findings." under it.)
+
+           ## Statistics
+           - Critical: <critical_count>
+           - Important: <important_count>
+           - Minor: <minor_count>
+           - Suggestion: <suggestion_count>
+
+        9. Call workflow_submit_output with the final JSON object. The
+           full_report_markdown field must be a single string (use '\n' for line breaks
+           within the JSON, or build it as a regular multi-line string in your reply —
+           the extractor will handle the final markdown content).
+    depends_on:
+      - security-expert
+      - performance-expert
+      - testability-expert
+      - maintainability-expert
+      - architecture-expert
+
+  # ===========================================================
+  # 4. Output-result: echo the final markdown report
+  # ===========================================================
+  - id: output-result
+    type: tool
+    name: "Output Final Report"
+    config:
+      tool: bash
+      command: |
+        set -euo pipefail
+
+        REVIEW_JSON=$(cat <<'__META_OUTPUT__'
+        {{nodes.meta-reviewer.result}}
+        __META_OUTPUT__
+        )
+
+        # Try to extract full_report_markdown with a small awk script
+        REPORT=$(printf '%s\n' "$REVIEW_JSON" | awk '
+          BEGIN { in_field = 0 }
+          /"full_report_markdown"[[:space:]]*:[[:space:]]*"/ {
+            in_field = 1
+            # Strip the prefix and the opening quote
+            sub(/^.*"full_report_markdown"[[:space:]]*:[[:space:]]*"/, "")
+            print
+            next
+          }
+          in_field == 1 {
+            if (match($0, /"[ ,}[:space:]]*$/)) {
+              # Close the field — strip the trailing quote and any trailing chars
+              sub(/"[ ,}]*$/, "")
+              print
+              in_field = 0
+            } else {
+              print
+            }
+          }
+        ')
+
+        # Fallback: if extraction yielded nothing, just echo the whole JSON
+        if [ -z "$REPORT" ]; then
+          echo "$REVIEW_JSON"
+        else
+          echo "$REPORT"
+        fi
+    depends_on:
+      - meta-reviewer
+
+edges:
+  - from: pre-check
+    to: security-expert
+  - from: pre-check
+    to: performance-expert
+  - from: pre-check
+    to: testability-expert
+  - from: pre-check
+    to: maintainability-expert
+  - from: pre-check
+    to: architecture-expert
+  - from: security-expert
+    to: meta-reviewer
+  - from: performance-expert
+    to: meta-reviewer
+  - from: testability-expert
+    to: meta-reviewer
+  - from: maintainability-expert
+    to: meta-reviewer
+  - from: architecture-expert
+    to: meta-reviewer
+  - from: meta-reviewer
+    to: output-result
+  - from: output-result
+    to: __end__
+
+metadata:
+  tags:
+    - code-review
+    - ai
+    - analysis

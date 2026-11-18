@@ -1,0 +1,190 @@
+{
+  "name": "@ai-setting/roy-bot-core",
+  "version": "1.7.96",
+  "type": "module",
+  "description": "Core SDK for roy-bot - Environment, Components, Tools, Sessions, Tasks",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./config": {
+      "import": "./dist/config/index.js",
+      "types": "./dist/config/index.d.ts"
+    },
+    "./env/task/prompt": {
+      "import": "./dist/env/task/prompt/index.js",
+      "types": "./dist/env/task/prompt/index.d.ts",
+      "default": "./dist/env/task/prompt/index.js"
+    },
+    "./env/task/plugins": {
+      "import": "./dist/env/task/plugins/index.js",
+      "types": "./dist/env/task/plugins/index.d.ts",
+      "default": "./dist/env/task/plugins/index.js"
+    },
+    "./env/task/mcp": {
+      "import": "./dist/env/task/mcp/index.js",
+      "types": "./dist/env/task/mcp/index.d.ts",
+      "default": "./dist/env/task/mcp/index.js"
+    },
+    "./env/task/backend": {
+      "import": "./dist/env/task/backend/index.js",
+      "types": "./dist/env/task/backend/index.d.ts",
+      "default": "./dist/env/task/backend/index.js"
+    },
+    "./env/error-reply": {
+      "import": "./dist/env/error-reply.js",
+      "types": "./dist/env/error-reply.d.ts",
+      "default": "./dist/env/error-reply.js"
+    },
+    "./env/lark-mention-utils": {
+      "import": "./dist/env/lark-mention-utils.js",
+      "types": "./dist/env/lark-mention-utils.d.ts",
+      "default": "./dist/env/lark-mention-utils.js"
+    },
+    "./env/tool/types": {
+      "import": "./dist/env/tool/types.js",
+      "types": "./dist/env/tool/types.d.ts",
+      "default": "./dist/env/tool/types.js"
+    },
+    "./env/event-source/event-store": {
+      "import": "./dist/env/event-source/event-store.js",
+      "types": "./dist/env/event-source/event-store.d.ts",
+      "default": "./dist/env/event-source/event-store.js"
+    },
+    "./env/event-source/cli-command-handler": {
+      "import": "./dist/env/event-source/cli-command-handler.js",
+      "types": "./dist/env/event-source/cli-command-handler.d.ts",
+      "default": "./dist/env/event-source/cli-command-handler.js"
+    },
+    "./env/event-source/event-source-handlers": {
+      "import": "./dist/env/event-source/event-source-handlers.js",
+      "types": "./dist/env/event-source/event-source-handlers.d.ts",
+      "default": "./dist/env/event-source/event-source-handlers.js"
+    },
+    "./env/event-source/wecom-respond-registry": {
+      "import": "./dist/env/event-source/wecom-respond-registry.js",
+      "types": "./dist/env/event-source/wecom-respond-registry.d.ts",
+      "default": "./dist/env/event-source/wecom-respond-registry.js"
+    },
+    "./env/event-source/wecom-session-card-sender": {
+      "import": "./dist/env/event-source/wecom-session-card-sender.js",
+      "types": "./dist/env/event-source/wecom-session-card-sender.d.ts"
+    },
+    "./env/task/plugins/wecom-session-card-store": {
+      "import": "./dist/env/task/plugins/wecom-session-card-store.js",
+      "types": "./dist/env/task/plugins/wecom-session-card-store.d.ts"
+    },
+    "./env/event-source/idempotency-key": {
+      "import": "./dist/env/event-source/idempotency-key.js",
+      "types": "./dist/env/event-source/idempotency-key.d.ts",
+      "default": "./dist/env/event-source/idempotency-key.js"
+    },
+    "./env/task/delegate/delegate-tool": {
+      "import": "./dist/env/task/delegate/delegate-tool.js",
+      "types": "./dist/env/task/delegate/delegate-tool.d.ts",
+      "default": "./dist/env/task/delegate/delegate-tool.js"
+    },
+    "./env/log-trace/logger": {
+      "import": "./dist/env/log-trace/logger.js",
+      "types": "./dist/env/log-trace/logger.d.ts",
+      "default": "./dist/env/log-trace/logger.js"
+    },
+    "./env/agent/agent-component": {
+      "import": "./dist/env/agent/agent-component.js",
+      "types": "./dist/env/agent/agent-component.d.ts",
+      "default": "./dist/env/agent/agent-component.js"
+    },
+    "./env/task/plugins/lark-card-patch-notifier": {
+      "import": "./dist/env/task/plugins/lark-card-patch-notifier.js",
+      "types": "./dist/env/task/plugins/lark-card-patch-notifier.d.ts",
+      "default": "./dist/env/task/plugins/lark-card-patch-notifier.js"
+    },
+    "./test-utils/child-process-mock": {
+      "import": "./dist/test-utils/child-process-mock.js",
+      "types": "./dist/test-utils/child-process-mock.d.ts",
+      "default": "./dist/test-utils/child-process-mock.js"
+    },
+    "./*": {
+      "import": "./dist/*/index.js",
+      "types": "./dist/*/index.d.ts"
+    },
+    "./*/*": {
+      "import": "./dist/*/*/index.js",
+      "types": "./dist/*/*/index.d.ts"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "bunup && bun run build:dts",
+    "build:dts": "tsc -p tsconfig.dts.json --noCheck",
+    "typecheck:dts": "tsc -p tsconfig.dts.json --noEmit",
+    "build:main": "bunup -- --entry src/index.ts",
+    "clean": "rm -rf dist",
+    "typecheck": "npx tsc --noEmit --skipLibCheck --project tsconfig.json",
+    "test:llm": "bun test test/llm/",
+    "test:llm:fast": "bun test --parallel=4 test/llm/"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.0",
+    "@ai-sdk/google": "^3.0.0",
+    "@ai-sdk/openai": "^3.0.0",
+    "@ai-sdk/openai-compatible": "^2.0.0",
+    "@earendil-works/pi-ai": "^0.74.2",
+    "@effect/platform": "^0.96.1",
+    "@effect/platform-node": "^0.106.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "ai": "^6.0.0",
+    "effect": "^3.21.2",
+    "glob": "^13.0.6",
+    "jsonc-parser": "^3.2.0",
+    "reflect-metadata": "^0.2.2",
+    "ws": "^8.16.0",
+    "xdg-basedir": "^5.1.0",
+    "yaml": "^2.3.0",
+    "zod": "^3.25.0",
+    "zod-to-json-schema": "^3.25.0"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^11.10.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/ws": "^8.5.10",
+    "bun-types": "^1.0.0",
+    "bunup": "^0.16.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ai-setting/roy-bot.git",
+    "directory": "packages/core"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org",
+    "access": "public"
+  },
+  "keywords": [
+    "roy-bot",
+    "agent",
+    "ai",
+    "sdk",
+    "core"
+  ],
+  "author": "ai-setting",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/ai-setting/roy-bot/issues"
+  }
+}

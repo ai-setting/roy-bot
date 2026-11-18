@@ -1,0 +1,56 @@
+# Test Workflow for Ask-User Interrupt
+# 
+# This workflow demonstrates:
+# 1. AskUserError is thrown when agent calls ask_user tool
+# 2. Workflow pauses with status='paused'
+# 3. Recovery with: roy workflow run -s <sessionId> --input "Yes"
+name: test-ask-user-interrupt
+description: Test workflow that triggers ask_user interrupt
+version: "1.0.0"
+entry: start
+
+nodes:
+  - id: start
+    type: tool
+    config:
+      tool: echo
+      params:
+        message: "Starting ask_user test workflow..."
+
+  - id: ask-user-node
+    type: agent
+    config:
+      agent_type: general
+      prompt: |
+        You are a test agent for ask_user functionality.
+        
+        Your task:
+        1. First, call the ask_user tool to ask the user a question
+        2. Use these parameters:
+           - query: "Do you want to continue with the test workflow?"
+           - options: ["Yes, continue", "No, stop"]
+        
+        IMPORTANT: You MUST use the ask_user tool to ask the question.
+        Do not respond without calling the ask_user tool first.
+    depends_on:
+      - start
+
+  - id: process-response
+    type: tool
+    config:
+      tool: echo
+      params:
+        message: "Processing user response: {{nodes.ask-user-node.output}}"
+    depends_on:
+      - ask-user-node
+
+  - id: end
+    type: tool
+    config:
+      tool: echo
+      params:
+        message: "Workflow completed successfully!"
+    depends_on:
+      - process-response
+
+edges: []

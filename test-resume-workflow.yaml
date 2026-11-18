@@ -1,0 +1,41 @@
+name: test-resume-pause
+description: Test workflow that pauses at ask_user node for resume testing (Task #1837: runId == sessionId)
+version: "1.0.0"
+entry: prepare
+
+metadata:
+  tags:
+    - test
+    - resume
+    - e2e
+
+nodes:
+  # Step 1: Echo greeting (no LLM)
+  - id: prepare
+    type: tool
+    config:
+      tool: echo
+      params:
+        message: "Workflow started - about to ask user for input"
+    depends_on: []
+
+  # Step 2: ask_user node pauses workflow
+  - id: confirm
+    type: ask_user
+    config:
+      query: "Do you want to continue execution?"
+      options:
+        - "Yes"
+        - "No"
+    depends_on:
+      - prepare
+
+  # Step 3: Final echo
+  - id: finish
+    type: tool
+    config:
+      tool: echo
+      params:
+        message: "Workflow resumed and completed successfully"
+    depends_on:
+      - confirm

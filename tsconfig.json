@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022"],
+    "types": ["bun-types"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "allowSyntheticDefaultImports": true,
+    // "isolatedModules": true, // Disabled to support const enum access from external libs (e.g., jsonc-parser)
+    "experimentalDecorators": true,
+    // 工作区源码别名：所有子包源文件引用 @ai-setting/* workspace 包时，
+    // 工具链（tsc/bundler/编辑器）会直接落到源码目录，避开 node_modules → dist 这条解析路径。
+    // 注意：TS 5+ 的 extends 不再自动继承 paths，子包 tsconfig 需要各自显式再声明一份。
+    "baseUrl": ".",
+    "paths": {
+      "@ai-setting/roy-bot-core": ["packages/core/src"],
+      "@ai-setting/roy-bot-core/*": ["packages/core/src/*"],
+      "@ai-setting/roy-bot-coder-harness": ["packages/coder-harness/src"],
+      "@ai-setting/roy-bot-coder-harness/*": ["packages/coder-harness/src/*"],
+      "@ai-setting/roy-bot-ontology-harness": ["packages/ontology-harness/src"],
+      "@ai-setting/roy-bot-ontology-harness/*": ["packages/ontology-harness/src/*"]
+    }
+  },
+  "include": ["src/**/*", "examples/**/*", "packages/*/src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    // 显式声明 paths（TS 5+ extends 不继承 paths/baseUrl）。
+    // 路径相对当前 tsconfig：packages/ontology-harness/ → ../core/src 等
+    "baseUrl": ".",
+    "paths": {
+      "@ai-setting/roy-bot-core": ["../core/src"],
+      "@ai-setting/roy-bot-core/*": ["../core/src/*"],
+      "@ai-setting/roy-bot-coder-harness": ["../coder-harness/src"],
+      "@ai-setting/roy-bot-coder-harness/*": ["../coder-harness/src/*"]
+    }
+  },
+  "include": ["src/**/*"]
+}

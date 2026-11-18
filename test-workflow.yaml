@@ -1,0 +1,38 @@
+name: test-trace-workflow
+description: Test workflow for trace validation
+version: "1.0.0"
+entry: start
+
+metadata:
+  tags:
+    - test
+    - e2e
+    - debug
+
+nodes:
+  - id: start
+    type: tool
+    config:
+      name: echo
+      args:
+        message: "Starting workflow..."
+
+  - id: process
+    type: tool
+    config:
+      name: echo
+      args:
+        message: "Processing..."
+
+  - id: end
+    type: tool
+    config:
+      name: echo
+      args:
+        message: "Workflow completed"
+
+edges:
+  - source: start
+    target: process
+  - source: process
+    target: end
