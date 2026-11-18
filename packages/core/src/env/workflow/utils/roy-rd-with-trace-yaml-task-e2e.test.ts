@@ -39,7 +39,7 @@ import * as path from 'node:path';
 import { parseWorkflowFile } from '../types/workflow';
 
 const ROOT = path.resolve(__dirname, '../../../../../..');
-const YAML_PATH = path.join(ROOT, 'roy-rd-with-trace.workflow.yaml');
+const YAML_PATH = path.join(ROOT, 'workflows/roy-rd-with-trace.workflow.yaml');
 
 describe('roy-rd-with-trace.workflow.yaml task-specific E2E (v1.2.0 — backward compat)', () => {
   it('workflow version is bumped to >=1.2.0 (1.2.0 or 1.3.0)', async () => {

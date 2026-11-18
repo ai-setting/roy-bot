@@ -21,7 +21,7 @@
     "build:desktop:dev": "bun run scripts/build-desktop-dev.ts",
     "build:desktop:release": "bun run scripts/build-desktop-release.ts",
     "clean": "rm -rf packages/*/dist",
-    "workflow:pev": "bun run packages/cli/dist/bin/roy-bot.js workflow run task-pev-agent.workflow.yaml --file",
+    "workflow:pev": "bun run packages/cli/dist/bin/roy-bot.js workflow run workflows/task-pev-agent.workflow.yaml --file",
     "workflow:pev:verify": "bun run scripts/verify-task-pev-workflow.ts",
     "workflow:pev:scenarios": "bun run scripts/verify-task-pev-scenarios.ts",
     "workflow:pev:fail-loop": "bun run scripts/verify-task-pev-fail-loop.ts",

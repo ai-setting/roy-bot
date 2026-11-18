@@ -13,7 +13,7 @@ import { resolve } from 'node:path';
 
 const ROOT = resolve(import.meta.dir, '..');
 const CLI = resolve(ROOT, 'packages/cli/dist/bin/roy-bot.js');
-const WORKFLOW = resolve(ROOT, 'task-pev-agent.workflow.yaml');
+const WORKFLOW = resolve(ROOT, 'workflows/task-pev-agent.workflow.yaml');
 const DB_PATH = `${process.env.HOME}/.local/share/roy-bot/sessions.db`;
 
 function runWorkflow(opts: {

@@ -11,7 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 
 const CLI = resolve(import.meta.dir, '../packages/cli/dist/bin/roy-bot.js');
-const WORKFLOW = resolve(import.meta.dir, '../task-pev-agent.workflow.yaml');
+const WORKFLOW = resolve(import.meta.dir, '../workflows/task-pev-agent.workflow.yaml');
 
 const DEFAULT_TASK =
   'Build a 3-step checklist for making tea, including safety note about hot water';

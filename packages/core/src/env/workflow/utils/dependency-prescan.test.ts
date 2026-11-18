@@ -349,7 +349,7 @@ describe('dependency-prescan', () => {
   it('roy-rd-with-trace.workflow.yaml passes prescan (back-edges exempted)', () => {
     const path = require('path') as typeof import('path');
     // __dirname = packages/core/src/env/workflow/utils/
-    // 6 levels up = project root
+    // 6 levels up = project root, then into workflows/
     const yamlPath = path.resolve(
       __dirname,
       '..',
@@ -358,6 +358,7 @@ describe('dependency-prescan', () => {
       '..',
       '..',
       '..',
+      'workflows',
       'roy-rd-with-trace.workflow.yaml'
     );
     const result: PrescanResult = prescanWorkflowFile(yamlPath);

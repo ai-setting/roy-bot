@@ -29,9 +29,9 @@
     "typecheck": "npx tsc --noEmit --skipLibCheck"
   },
   "dependencies": {
-    "@ai-setting/roy-bot-coder-harness": "^1.5.50",
-    "@ai-setting/roy-bot-core": "^1.5.83",
-    "@ai-setting/roy-bot-ontology-harness": "^1.5.47",
+    "@ai-setting/roy-bot-coder-harness": "workspace:*",
+    "@ai-setting/roy-bot-core": "workspace:*",
+    "@ai-setting/roy-bot-ontology-harness": "workspace:*",
     "@clack/prompts": "^1.7.0",
     "@earendil-works/pi-ai": "^0.74.2",
     "@opentui/core": "^0.6.6",

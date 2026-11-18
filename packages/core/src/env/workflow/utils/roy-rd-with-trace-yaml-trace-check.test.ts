@@ -32,7 +32,7 @@ import * as path from 'node:path';
 import { parseWorkflowFile } from '../types/workflow';
 
 const ROOT = path.resolve(__dirname, '../../../../../..');
-const YAML_PATH = path.join(ROOT, 'roy-rd-with-trace.workflow.yaml');
+const YAML_PATH = path.join(ROOT, 'workflows/roy-rd-with-trace.workflow.yaml');
 
 /**
  * Extract every SQL string that appears inside a fenced bash code block

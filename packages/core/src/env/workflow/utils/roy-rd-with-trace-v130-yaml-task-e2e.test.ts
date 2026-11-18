@@ -37,7 +37,7 @@ import * as path from 'node:path';
 import { parseWorkflowFile } from '../types/workflow';
 
 const ROOT = path.resolve(__dirname, '../../../../../..');
-const YAML_PATH = path.join(ROOT, 'roy-rd-with-trace.workflow.yaml');
+const YAML_PATH = path.join(ROOT, 'workflows/roy-rd-with-trace.workflow.yaml');
 const PRESCAN_PATH = path.join(
   ROOT,
   'packages/core/src/env/workflow/utils/dependency-prescan.ts'

@@ -30,7 +30,7 @@ import { NodeRegistry } from './node-registry';
 import type { NodeDefinition, WorkflowDefinition } from '../types';
 
 // Test file: packages/core/src/env/workflow/engine/yaml-back-edge-review-e2e.test.ts
-// YAML lives at worktree root. Resolve __dirname -> 6 levels up.
+// YAML lives at worktree root workflows/. Resolve __dirname -> 6 levels up.
 const WORKFLOW_YAML_PATH = resolve(
   __dirname,
   '..', // engine/ -> workflow/
@@ -39,6 +39,7 @@ const WORKFLOW_YAML_PATH = resolve(
   '..', // src/ -> core/
   '..', // core/ -> packages/
   '..', // packages/ -> worktree root
+  'workflows',
   'roy-rd-with-trace.workflow.yaml',
 );
 
