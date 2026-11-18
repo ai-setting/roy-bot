@@ -1,6 +1,6 @@
 {
   "name": "@ai-setting/roy-bot-standalone",
-  "version": "1.7.95",
+  "version": "1.7.96",
   "description": "Intelligent OS for AI agents - Standalone binary for all platforms",
   "type": "module",
   "bin": {

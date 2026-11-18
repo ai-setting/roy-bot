@@ -40,6 +40,12 @@
     "packages/*"
   ],
   "devDependencies": {
+    "@opentui/core-darwin-arm64": "0.6.8",
+    "@opentui/core-darwin-x64": "0.6.8",
+    "@opentui/core-linux-arm64": "0.6.8",
+    "@opentui/core-linux-arm64-musl": "0.6.8",
+    "@opentui/core-win32-arm64": "0.6.8",
+    "@opentui/core-win32-x64": "0.6.8",
     "@types/jsdom": "^28.0.1",
     "bun-types": "^1.0.0",
     "bunup": "^0.16.0",

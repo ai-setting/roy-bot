@@ -1196,7 +1196,7 @@ describe("PerTaskGroupChatPlugin", () => {
     //   Task #3974 案例：path 太长 → description 105 chars → lark-cli exit code 2 → chat 未创建
     it("should handle long description gracefully (truncate to 100 chars)", () => {
       const plugin = new PerTaskGroupChatPlugin();
-      const longDescription = "roy-bot task 3974 - ~/work/codework/personal/roy_world/roy-bot/.worktrees/feat-per-task-group";
+      const longDescription = "roy-bot task 3974 - ~/work/codework/personal/roy_world/roy-bot/.worktrees/feat-per-task-group-longer-branch";
       expect(longDescription.length).toBeGreaterThan(100);
       const args = (plugin as any).buildCreateGroupChatArgs({
         name: "Task 3974 - AI Agent 创业方向调研报告（2025-2026）",

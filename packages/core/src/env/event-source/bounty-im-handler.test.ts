@@ -1356,7 +1356,7 @@ describe("isSelfEcho helper (Task #2136)", () => {
   test("returns true when fromEmail matches case-insensitively (whitespace tolerant)", async () => {
     const { isSelfEcho } = await import("./bounty-im-handler");
     const msg = {
-      fromEmail: "  GDDZHAOKUN@126.COM ",
+      fromEmail: "  USER@EXAMPLE.COM ",
       from: "30193cb7-651d-4bf2-8439-052d9a466cf7@authenticated",
       to: "user@example.com",
     };

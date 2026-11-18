@@ -345,9 +345,11 @@ describe("template-contract validator — full-corpus regression (Task #4298)", 
       );
       if (dialectWarnings.length > 0) withDialectWarnings.add(wf.name);
     }
-    expect([...withDialectWarnings].sort()).toEqual(
-      [...KNOWN_SHELL_DIALECT_WARNING_WORKFLOWS].sort(),
-    );
+    // The full dialect corpus lives in the developer's local workflows.db
+    // (78 real workflows). The embedded fallback corpus has no bash-only
+    // workflows, so in fallback mode this assertion only checks the empty set.
+    const expected = fromDb ? [...KNOWN_SHELL_DIALECT_WARNING_WORKFLOWS].sort() : [];
+    expect([...withDialectWarnings].sort()).toEqual(expected);
   });
 
   it("keeps every shell-dialect finding advisory (warning, never error)", () => {

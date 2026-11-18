@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "vite",
     "build:electron": "bun run electron/build-preload.js",
-"dev:electron": "bun run electron/build-preload.js && concurrently \"vite\" \"npm run electron:dev\"",
+    "dev:electron": "bun run electron/build-preload.js && concurrently \"vite\" \"npm run electron:dev\"",
     "electron:dev": "wait-on http://localhost:1420 && cross-env NODE_ENV=development electron .",
     "preelectron:build": "node -e \"const fs=require('fs');const path=require('path');const pkgDir=process.cwd();const nodeModulesSrc=path.join(pkgDir,'node_modules');const nodeModulesDest=path.join(pkgDir,'vendor/node_modules');fs.mkdirSync(path.join(pkgDir,'vendor'),{recursive:true});if(fs.existsSync(nodeModulesSrc)){fs.rmSync(nodeModulesDest,{recursive:true,force:true});fs.cpSync(nodeModulesSrc,nodeModulesDest,{recursive:true});console.log('Copied node_modules to vendor/')}\"",
     "electron:build": "node electron/build-preload.js && electron-builder --config electron-builder.json",
@@ -63,5 +63,6 @@
     "vite-tsconfig-paths": "^5.0.0",
     "vitest": "^2.1.0",
     "wait-on": "^7.0.0"
-  }
+  },
+  "private": true
 }
